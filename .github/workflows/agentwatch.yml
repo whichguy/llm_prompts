@@ -75,22 +75,18 @@ jobs:
           # Ensure .github directory exists
           os.makedirs(".github", exist_ok=True)
           
-          # Load existing config or create new
+          # Load existing config or create new with GLOBAL patterns
           if os.path.exists(config_file):
               with open(config_file, 'r') as f:
-                  config = yaml.safe_load(f) or {"version": 1, "watches": {}, "excludes": {}}
+                  config = yaml.safe_load(f) or {"version": 1, "watches": [], "excludes": []}
           else:
-              config = {"version": 1, "watches": {}, "excludes": {}}
+              config = {"version": 1, "watches": [], "excludes": []}
           
-          # Initialize PR-specific watches and excludes if needed
-          if "watches" not in config:
-              config["watches"] = {}
-          if "excludes" not in config:
-              config["excludes"] = {}
-          if pr_branch not in config["watches"]:
-              config["watches"][pr_branch] = []
-          if pr_branch not in config["excludes"]:
-              config["excludes"][pr_branch] = []
+          # Initialize global watches and excludes arrays if needed
+          if "watches" not in config or not isinstance(config["watches"], list):
+              config["watches"] = []
+          if "excludes" not in config or not isinstance(config["excludes"], list):
+              config["excludes"] = []
           
           # Parse command
           output = {"command": "unknown", "message": ""}
@@ -113,9 +109,9 @@ jobs:
                   output["message"] = f"❌ Cannot watch protected pattern: {pattern}"
                   output["command"] = "error"
               else:
-                  # Check if this watch already exists for this PR
+                  # Check if this global watch already exists
                   existing = None
-                  for watch in config["watches"][pr_branch]:
+                  for watch in config["watches"]:
                       if watch["pattern"] == pattern and watch["agent"] == agent:
                           existing = watch
                           break
@@ -125,18 +121,19 @@ jobs:
                       existing["args"] = args
                       existing["updated_by"] = user
                       existing["updated_at"] = datetime.utcnow().isoformat() + "Z"
-                      output["message"] = f"Updated existing watch: {pattern} -> {agent}"
+                      output["message"] = f"Updated existing global watch: {pattern} -> {agent}"
                   else:
-                      # Add new watch for this PR
-                      config["watches"][pr_branch].append({
+                      # Add new global watch
+                      config["watches"].append({
                           "pattern": pattern,
                           "agent": agent,
                           "args": args,
                           "added_by": user,
                           "added_at": datetime.utcnow().isoformat() + "Z",
-                          "pr": pr_number
+                          "pr": pr_number,
+                          "branch": pr_branch
                       })
-                      output["message"] = f"Added new watch: {pattern} -> {agent}"
+                      output["message"] = f"Added new global watch: {pattern} -> {agent}"
                   
                   output["command"] = "watch"
                   output["pattern"] = pattern
@@ -153,16 +150,15 @@ jobs:
               agent = unwatch_match.group(1)
               pattern = unwatch_match.group(2)
               
-              # Try to remove matching watch from this PR's watches
+              # Try to remove matching watch from global watches
               found_exact_match = False
-              if pr_branch in config["watches"]:
-                  original_count = len(config["watches"][pr_branch])
-                  config["watches"][pr_branch] = [w for w in config["watches"][pr_branch] 
-                                      if not (w["pattern"] == pattern and w["agent"] == agent)]
-                  
-                  if len(config["watches"][pr_branch]) < original_count:
-                      found_exact_match = True
-                      output["message"] = f"Removed watch: {pattern} -> {agent}"
+              original_count = len(config["watches"])
+              config["watches"] = [w for w in config["watches"] 
+                                  if not (w["pattern"] == pattern and w["agent"] == agent)]
+              
+              if len(config["watches"]) < original_count:
+                  found_exact_match = True
+                  output["message"] = f"Removed global watch: {pattern} -> {agent}"
               
               if not found_exact_match:
                   # Add to exclude list if not found in watches
@@ -174,18 +170,18 @@ jobs:
                       "pr": pr_number
                   }
                   
-                  # Check if already in excludes
+                  # Check if already in global excludes
                   already_excluded = False
-                  for exc in config["excludes"][pr_branch]:
+                  for exc in config["excludes"]:
                       if exc["pattern"] == pattern and exc["agent"] == agent:
                           already_excluded = True
                           break
                   
                   if not already_excluded:
-                      config["excludes"][pr_branch].append(exclude_entry)
-                      output["message"] = f"Pattern not in watches, added to exclude list: {pattern} -> {agent}"
+                      config["excludes"].append(exclude_entry)
+                      output["message"] = f"Pattern not in watches, added to global exclude list: {pattern} -> {agent}"
                   else:
-                      output["message"] = f"Pattern already in exclude list: {pattern} -> {agent}"
+                      output["message"] = f"Pattern already in global exclude list: {pattern} -> {agent}"
               
               # Save config
               with open(config_file, 'w') as f:
@@ -227,22 +223,22 @@ jobs:
                   "pr": pr_number
               }
               
-              # Check if already in excludes
+              # Check if already in global excludes
               already_excluded = False
-              for exc in config["excludes"][pr_branch]:
+              for exc in config["excludes"]:
                   if exc["pattern"] == pattern and exc["agent"] == agent:
                       already_excluded = True
                       break
               
               if not already_excluded:
-                  config["excludes"][pr_branch].append(exclude_entry)
-                  output["message"] = f"Added to exclude list: {pattern} -> {agent}"
+                  config["excludes"].append(exclude_entry)
+                  output["message"] = f"Added to global exclude list: {pattern} -> {agent}"
                   
                   # Save config
                   with open(config_file, 'w') as f:
                       yaml.dump(config, f, default_flow_style=False, sort_keys=False)
               else:
-                  output["message"] = f"Already in exclude list: {pattern} -> {agent}"
+                  output["message"] = f"Already in global exclude list: {pattern} -> {agent}"
               
               output["command"] = "ignore"
               output["pattern"] = pattern
@@ -251,11 +247,11 @@ jobs:
           # @agent-list
           if "@agent-list" in comment:
               output["command"] = "list"
-              pr_watches = config["watches"].get(pr_branch, [])
-              pr_excludes = config["excludes"].get(pr_branch, [])
-              output["watches"] = pr_watches
-              output["excludes"] = pr_excludes
-              output["message"] = f"Found {len(pr_watches)} active watches and {len(pr_excludes)} excludes for PR #{pr_number}"
+              global_watches = config["watches"]
+              global_excludes = config["excludes"]
+              output["watches"] = global_watches
+              output["excludes"] = global_excludes
+              output["message"] = f"Found {len(global_watches)} global watches and {len(global_excludes)} global excludes"
           
           # Output for GitHub Actions
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
@@ -378,20 +374,20 @@ jobs:
             if (command === 'error') {
               body = message;  // Error message about protected patterns
             } else if (command === 'watch') {
-              body = `✅ **AgentWatch Pattern Saved to Main**
+              body = `✅ **Global AgentWatch Pattern Added**
               
               📁 **Pattern**: \`${pattern}\`
               🤖 **Agent**: ${agent}
               ⚙️ **Args**: ${args || 'none'}
-              🌳 **Branch**: Monitoring PR #${{ steps.pr.outputs.pr_number }} (\`${{ steps.pr.outputs.head_ref }}\`)
+              🌍 **Scope**: Active across ALL repository branches
               📝 **Config**: Updated \`.github/agentwatch.yml\` on \`main\` branch
               
               ${message}
               
-              This pattern is now active. Use \`@agent-unwatch ${agent} ${pattern}\` to remove.`;
+              This pattern will trigger on ANY PR with matching files. Use \`@agent-unwatch ${agent} ${pattern}\` to remove.`;
               
             } else if (command === 'unwatch') {
-              body = `✅ **AgentWatch Pattern Removed from Main**
+              body = `✅ **Global AgentWatch Pattern Updated**
               
               ${message}
               
@@ -409,43 +405,46 @@ jobs:
               The agent will analyze files matching the pattern in this PR.`;
               
             } else if (command === 'ignore') {
-              body = `🚫 **AgentWatch Pattern Ignored**
+              body = `🚫 **Global AgentWatch Pattern Ignored**
               
               📁 **Pattern**: \`${pattern}\`
               🤖 **Agent**: ${agent}
-              📝 **Config**: Added to exclude list in \`.github/agentwatch.yml\` on \`main\` branch
+              🌍 **Scope**: Excluded across ALL repository branches
+              📝 **Config**: Added to global exclude list in \`.github/agentwatch.yml\` on \`main\` branch
               
               ${message}
               
-              This pattern/agent combination will be excluded from automatic monitoring.`;
+              This pattern/agent combination will be excluded from automatic monitoring globally.`;
               
             } else if (command === 'list') {
               const watches = ${{ steps.process.outputs.watches || '[]' }};
               const excludes = ${{ steps.process.outputs.excludes || '[]' }};
               
-              body = `📋 **AgentWatch Configuration for PR #${{ steps.pr.outputs.pr_number }}**\n\n`;
+              body = `📋 **Global AgentWatch Configuration**\n\n`;
               
               if (watches.length > 0) {
-                body += `✅ **Active Watches:**\n\n`;
+                body += `✅ **Global Watches** (active across ALL branches):\n\n`;
                 watches.forEach((w, i) => {
                   body += `${i + 1}. **Pattern**: \`${w.pattern}\`\n`;
                   body += `   **Agent**: ${w.agent}`;
                   if (w.args) body += ` | **Args**: ${w.args}`;
-                  body += `\n   **Added by**: @${w.added_by} on ${new Date(w.added_at).toLocaleDateString()}\n\n`;
+                  body += `\n   **Added by**: @${w.added_by} on ${new Date(w.added_at).toLocaleDateString()}`;
+                  if (w.branch) body += ` (from branch: ${w.branch})`;
+                  body += `\n\n`;
                 });
               } else {
-                body += `ℹ️ No active watches configured.\n\n`;
+                body += `ℹ️ No global watches configured.\n\n`;
               }
               
               if (excludes.length > 0) {
-                body += `🚫 **Excluded Patterns:**\n\n`;
+                body += `🚫 **Global Excludes** (excluded across ALL branches):\n\n`;
                 excludes.forEach((e, i) => {
                   body += `${i + 1}. **Pattern**: \`${e.pattern}\` | **Agent**: ${e.agent}\n`;
                   body += `   **Excluded by**: @${e.excluded_by} on ${new Date(e.excluded_at).toLocaleDateString()}\n\n`;
                 });
               }
               
-              body += `\n📝 Configuration stored in \`.github/agentwatch.yml\` on \`main\` branch`;
+              body += `\n📝 Global configuration stored in \`.github/agentwatch.yml\` on \`main\` branch`;
             } else {
               body = `❌ **Unknown AgentWatch Command**
               
@@ -501,12 +500,13 @@ jobs:
               sys.exit(0)
           
           with open(config_file, 'r') as f:
-              config = yaml.safe_load(f) or {"watches": {}, "excludes": {}}
+              config = yaml.safe_load(f) or {"watches": [], "excludes": []}
           
-          watches = config.get("watches", {}).get(pr_branch, [])
-          excludes = config.get("excludes", {}).get(pr_branch, [])
+          watches = config.get("watches", [])
+          excludes = config.get("excludes", [])
           
-          print(f"Found {len(watches)} watches and {len(excludes)} excludes for branch: {pr_branch}")
+          print(f"Found {len(watches)} global watches and {len(excludes)} global excludes")
+          print(f"Checking patterns for PR branch: {pr_branch}")
           
           # Get changed files (this would come from GitHub API)
           # For now, just log what we would check
@@ -524,6 +524,7 @@ jobs:
               
               if not is_excluded:
                   print(f"Would check pattern: {pattern} for agent: {agent}")
+                  print(f"  Added by: {watch.get('added_by', 'unknown')} from branch: {watch.get('branch', 'unknown')}")
                   # Here we would match against changed files and trigger agents
           EOF
           
