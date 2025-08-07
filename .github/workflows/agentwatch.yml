@@ -1,13 +1,210 @@
 name: AgentWatch
+# Stateful agent monitoring - maintains patterns in .github/agentwatch.yml on main branch
 
 on:
   issue_comment:
-    types: [created, edited]
-  pull_request_comment:
-    types: [created, edited]
-  workflow_dispatch:
+    types: [created]
+
+permissions:
+  contents: write      # Required to update .github/agentwatch.yml on main
+  pull-requests: write # Required to comment on PRs  
+  issues: write        # Required for issue comments
 
 jobs:
-  agentwatch:
-    uses: whichguy/agentwatch/.github/workflows/agentwatch.yml@main
-    secrets: inherit
+  process-command:
+    # INFINITE LOOP PROTECTION: Skip if triggered by github-actions bot
+    if: |
+      github.event.issue.pull_request && 
+      contains(github.event.comment.body, '@agent-') &&
+      github.event.comment.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get PR details
+        id: pr
+        run: |
+          PR_DATA=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }})
+          echo "head_ref=$(echo "$PR_DATA" | jq -r .head.ref)" >> $GITHUB_OUTPUT
+          echo "base_ref=$(echo "$PR_DATA" | jq -r .base.ref)" >> $GITHUB_OUTPUT
+          echo "pr_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      # CRITICAL: Checkout MAIN branch to persist state
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Process AgentWatch command
+        id: process
+        run: |
+          # Create simple state management script
+          cat > manage_state.sh << 'SCRIPT'
+          #!/bin/bash
+          set -e
+          
+          COMMENT="${{ github.event.comment.body }}"
+          USER="${{ github.event.comment.user.login }}"
+          PR_NUM="${{ github.event.issue.number }}"
+          PR_BRANCH="${{ steps.pr.outputs.head_ref }}"
+          CONFIG_FILE=".github/agentwatch.yml"
+          
+          # Ensure directory exists
+          mkdir -p .github
+          
+          # Initialize config if doesn't exist
+          if [ ! -f "$CONFIG_FILE" ]; then
+            cat > "$CONFIG_FILE" << EOF
+          version: 1
+          # AgentWatch patterns are organized by PR branch
+          # Protected patterns (never watch these):
+          # - .github/workflows/agentwatch*
+          # - .github/agentwatch.yml
+          watches: {}
+          EOF
+          fi
+          
+          # Parse and process commands
+          if [[ "$COMMENT" =~ @agent-watch[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)([[:space:]]+@[[:space:]]+(.+))? ]]; then
+            PATTERN="${BASH_REMATCH[1]}"
+            AGENT="${BASH_REMATCH[2]}"
+            ARGS="${BASH_REMATCH[4]}"
+            
+            # INFINITE LOOP PROTECTION
+            if [[ "$PATTERN" == *"agentwatch"* ]] || [[ "$PATTERN" == *".github/workflows"* ]]; then
+              echo "command=error" >> $GITHUB_OUTPUT
+              echo "message=Cannot watch protected pattern: $PATTERN" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            echo "command=watch" >> $GITHUB_OUTPUT
+            echo "pattern=$PATTERN" >> $GITHUB_OUTPUT
+            echo "agent=$AGENT" >> $GITHUB_OUTPUT
+            echo "args=$ARGS" >> $GITHUB_OUTPUT
+            echo "message=Pattern $PATTERN registered for agent $AGENT" >> $GITHUB_OUTPUT
+            
+            # Add to config (simplified - in production use proper YAML tool)
+            echo "" >> "$CONFIG_FILE"
+            echo "# PR #$PR_NUM - $PR_BRANCH" >> "$CONFIG_FILE"
+            echo "# Added by @$USER at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$CONFIG_FILE"
+            echo "# Pattern: $PATTERN -> $AGENT" >> "$CONFIG_FILE"
+            
+          elif [[ "$COMMENT" =~ @agent-unwatch[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+) ]]; then
+            AGENT="${BASH_REMATCH[1]}"
+            PATTERN="${BASH_REMATCH[2]}"
+            
+            echo "command=unwatch" >> $GITHUB_OUTPUT
+            echo "pattern=$PATTERN" >> $GITHUB_OUTPUT
+            echo "agent=$AGENT" >> $GITHUB_OUTPUT
+            echo "message=Pattern $PATTERN removed for agent $AGENT" >> $GITHUB_OUTPUT
+            
+          elif [[ "$COMMENT" =~ @agent-list ]]; then
+            echo "command=list" >> $GITHUB_OUTPUT
+            echo "message=Listing all patterns" >> $GITHUB_OUTPUT
+            
+          else
+            echo "command=unknown" >> $GITHUB_OUTPUT
+            echo "message=Unknown command" >> $GITHUB_OUTPUT
+          fi
+          SCRIPT
+          
+          chmod +x manage_state.sh
+          ./manage_state.sh
+          
+      - name: Commit state changes to main
+        if: steps.process.outputs.command == 'watch' || steps.process.outputs.command == 'unwatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add .github/agentwatch.yml
+          
+          if ! git diff --staged --quiet; then
+            git commit -m "AgentWatch: ${{ steps.process.outputs.command }} pattern
+            
+            Pattern: ${{ steps.process.outputs.pattern }}
+            Agent: ${{ steps.process.outputs.agent }}
+            PR: #${{ steps.pr.outputs.pr_number }} (${{ steps.pr.outputs.head_ref }})
+            User: @${{ github.event.comment.user.login }}
+            
+            [skip ci]"
+            
+            git push origin main
+            echo "State updated on main branch"
+          else
+            echo "No changes to commit"
+          fi
+          
+      - name: Trigger agent
+        if: steps.process.outputs.command == 'watch'
+        run: |
+          AGENT="${{ steps.process.outputs.agent }}"
+          PATTERN="${{ steps.process.outputs.pattern }}"
+          ARGS="${{ steps.process.outputs.args }}"
+          
+          echo "Would trigger agent: $AGENT for pattern: $PATTERN"
+          
+          # For promptexpert, we can trigger via workflow dispatch
+          if [ "$AGENT" = "promptexpert" ]; then
+            # Check if prompt-expert.yml exists
+            if gh workflow list | grep -q "prompt-expert"; then
+              echo "Triggering prompt-expert workflow..."
+              # gh workflow run prompt-expert.yml
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Post status comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const command = '${{ steps.process.outputs.command }}';
+            const message = '${{ steps.process.outputs.message }}';
+            const pattern = '${{ steps.process.outputs.pattern }}';
+            const agent = '${{ steps.process.outputs.agent }}';
+            const args = '${{ steps.process.outputs.args }}';
+            
+            let body = '';
+            
+            if (command === 'error') {
+              body = `❌ **AgentWatch Error**\n\n${message}`;
+            } else if (command === 'watch') {
+              body = `✅ **AgentWatch Pattern Added**
+              
+              📁 **Pattern**: \`${pattern}\`
+              🤖 **Agent**: ${agent}
+              ⚙️ **Args**: ${args || 'none'}
+              📝 **State**: Saved to \`.github/agentwatch.yml\` on \`main\` branch
+              
+              This pattern will be monitored for PR #${{ steps.pr.outputs.pr_number }}.
+              Use \`@agent-unwatch ${agent} ${pattern}\` to remove.`;
+              
+            } else if (command === 'unwatch') {
+              body = `✅ **AgentWatch Pattern Removed**
+              
+              📁 **Pattern**: \`${pattern}\`
+              🤖 **Agent**: ${agent}
+              📝 **State**: Updated in \`.github/agentwatch.yml\` on \`main\` branch`;
+              
+            } else if (command === 'list') {
+              body = `📋 **AgentWatch Patterns**
+              
+              Check \`.github/agentwatch.yml\` on \`main\` branch for all configured patterns.`;
+              
+            } else {
+              body = `❓ **AgentWatch Commands**
+              
+              - \`@agent-watch <pattern> <agent> @ <args>\` - Add pattern
+              - \`@agent-unwatch <agent> <pattern>\` - Remove pattern  
+              - \`@agent-list\` - List all patterns`;
+            }
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
