@@ -1,0 +1,3 @@
+# AgentWatch Configuration
+# This file stores repository-wide watcher configurations
+watchers: []
