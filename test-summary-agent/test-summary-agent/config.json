@@ -1,0 +1,24 @@
+{
+  "app": {
+    "name": "Test Application",
+    "version": "1.0.0",
+    "environment": "development",
+    "port": 3000
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "testdb",
+    "user": "admin",
+    "password": "changeme123"
+  },
+  "api": {
+    "key": "sk-test-key-12345",
+    "endpoint": "https://api.example.com"
+  },
+  "features": {
+    "enableAuth": true,
+    "enableCache": false,
+    "maxUsers": 1000
+  }
+}
