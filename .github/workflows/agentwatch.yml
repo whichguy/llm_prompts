@@ -1,19 +1,22 @@
 name: AgentWatch
-# Stateful agent monitoring - maintains patterns in .github/agentwatch.yml on main branch
+# Maintains watch patterns in .github/agentwatch.yml on MAIN branch
 
 on:
   issue_comment:
     types: [created]
+  pull_request:
+    types: [opened, synchronize]
 
 permissions:
   contents: write      # Required to update .github/agentwatch.yml on main
-  pull-requests: write # Required to comment on PRs  
+  pull-requests: write # Required to comment on PRs
   issues: write        # Required for issue comments
 
 jobs:
   process-command:
     # INFINITE LOOP PROTECTION: Skip if triggered by github-actions bot
     if: |
+      github.event_name == 'issue_comment' &&
       github.event.issue.pull_request && 
       contains(github.event.comment.body, '@agent-') &&
       github.event.comment.user.login != 'github-actions[bot]'
@@ -29,128 +32,331 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
-      # CRITICAL: Checkout MAIN branch to persist state
+      # CRITICAL: Checkout MAIN branch, not PR branch
       - name: Checkout main branch
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: main  # Always work on main branch
           token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Setup Python for YAML handling
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+          
+      - name: Install PyYAML
+        run: pip install pyyaml
           
       - name: Process AgentWatch command
         id: process
         run: |
-          # Create simple state management script
-          cat > manage_state.sh << 'SCRIPT'
-          #!/bin/bash
-          set -e
+          cat > process_command.py << 'EOF'
+          import yaml
+          import json
+          import sys
+          import re
+          import os
+          from datetime import datetime
           
-          COMMENT="${{ github.event.comment.body }}"
-          USER="${{ github.event.comment.user.login }}"
-          PR_NUM="${{ github.event.issue.number }}"
-          PR_BRANCH="${{ steps.pr.outputs.head_ref }}"
-          CONFIG_FILE=".github/agentwatch.yml"
+          comment = """${{ github.event.comment.body }}"""
+          user = "${{ github.event.comment.user.login }}"
+          pr_number = ${{ github.event.issue.number }}
+          pr_branch = "${{ steps.pr.outputs.head_ref }}"
           
-          # Ensure directory exists
-          mkdir -p .github
+          config_file = ".github/agentwatch.yml"
           
-          # Initialize config if doesn't exist
-          if [ ! -f "$CONFIG_FILE" ]; then
-            cat > "$CONFIG_FILE" << EOF
-          version: 1
-          # AgentWatch patterns are organized by PR branch
-          # Protected patterns (never watch these):
-          # - .github/workflows/agentwatch*
-          # - .github/agentwatch.yml
-          watches: {}
+          # INFINITE LOOP PROTECTION: Never watch agentwatch files
+          PROTECTED_PATTERNS = [
+              ".github/workflows/agentwatch*",
+              ".github/agentwatch.yml",
+              "**/agentwatch*"
+          ]
+          
+          # Ensure .github directory exists
+          os.makedirs(".github", exist_ok=True)
+          
+          # Load existing config or create new
+          if os.path.exists(config_file):
+              with open(config_file, 'r') as f:
+                  config = yaml.safe_load(f) or {"version": 1, "watches": {}, "excludes": {}}
+          else:
+              config = {"version": 1, "watches": {}, "excludes": {}}
+          
+          # Initialize PR-specific watches and excludes if needed
+          if "watches" not in config:
+              config["watches"] = {}
+          if "excludes" not in config:
+              config["excludes"] = {}
+          if pr_branch not in config["watches"]:
+              config["watches"][pr_branch] = []
+          if pr_branch not in config["excludes"]:
+              config["excludes"][pr_branch] = []
+          
+          # Parse command
+          output = {"command": "unknown", "message": ""}
+          
+          # @agent-watch pattern agent @ args
+          watch_match = re.search(r'@agent-watch\s+([^\s]+)\s+([^\s]+)(?:\s+@\s+(.+))?', comment)
+          if watch_match:
+              pattern = watch_match.group(1)
+              agent = watch_match.group(2)
+              args = watch_match.group(3) or ""
+              
+              # INFINITE LOOP PROTECTION
+              is_protected = False
+              for protected in PROTECTED_PATTERNS:
+                  if protected in pattern or pattern in protected:
+                      is_protected = True
+                      break
+              
+              if is_protected:
+                  output["message"] = f"❌ Cannot watch protected pattern: {pattern}"
+                  output["command"] = "error"
+              else:
+                  # Check if this watch already exists for this PR
+                  existing = None
+                  for watch in config["watches"][pr_branch]:
+                      if watch["pattern"] == pattern and watch["agent"] == agent:
+                          existing = watch
+                          break
+                  
+                  if existing:
+                      # Update existing watch
+                      existing["args"] = args
+                      existing["updated_by"] = user
+                      existing["updated_at"] = datetime.utcnow().isoformat() + "Z"
+                      output["message"] = f"Updated existing watch: {pattern} -> {agent}"
+                  else:
+                      # Add new watch for this PR
+                      config["watches"][pr_branch].append({
+                          "pattern": pattern,
+                          "agent": agent,
+                          "args": args,
+                          "added_by": user,
+                          "added_at": datetime.utcnow().isoformat() + "Z",
+                          "pr": pr_number
+                      })
+                      output["message"] = f"Added new watch: {pattern} -> {agent}"
+                  
+                  output["command"] = "watch"
+                  output["pattern"] = pattern
+                  output["agent"] = agent
+                  output["args"] = args
+                  
+                  # Save config
+                  with open(config_file, 'w') as f:
+                      yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+          
+          # @agent-unwatch agent pattern
+          unwatch_match = re.search(r'@agent-unwatch\s+([^\s]+)\s+([^\s]+)', comment)
+          if unwatch_match:
+              agent = unwatch_match.group(1)
+              pattern = unwatch_match.group(2)
+              
+              # Try to remove matching watch from this PR's watches
+              found_exact_match = False
+              if pr_branch in config["watches"]:
+                  original_count = len(config["watches"][pr_branch])
+                  config["watches"][pr_branch] = [w for w in config["watches"][pr_branch] 
+                                      if not (w["pattern"] == pattern and w["agent"] == agent)]
+                  
+                  if len(config["watches"][pr_branch]) < original_count:
+                      found_exact_match = True
+                      output["message"] = f"Removed watch: {pattern} -> {agent}"
+              
+              if not found_exact_match:
+                  # Add to exclude list if not found in watches
+                  exclude_entry = {
+                      "pattern": pattern,
+                      "agent": agent,
+                      "excluded_by": user,
+                      "excluded_at": datetime.utcnow().isoformat() + "Z",
+                      "pr": pr_number
+                  }
+                  
+                  # Check if already in excludes
+                  already_excluded = False
+                  for exc in config["excludes"][pr_branch]:
+                      if exc["pattern"] == pattern and exc["agent"] == agent:
+                          already_excluded = True
+                          break
+                  
+                  if not already_excluded:
+                      config["excludes"][pr_branch].append(exclude_entry)
+                      output["message"] = f"Pattern not in watches, added to exclude list: {pattern} -> {agent}"
+                  else:
+                      output["message"] = f"Pattern already in exclude list: {pattern} -> {agent}"
+              
+              # Save config
+              with open(config_file, 'w') as f:
+                  yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+              
+              output["command"] = "unwatch"
+              output["pattern"] = pattern
+              output["agent"] = agent
+          
+          # @agent-run [pattern] [agent] - Run agent immediately without state changes
+          run_match = re.search(r'@agent-run(?:\s+([^\s]+))?(?:\s+([^\s]+))?', comment)
+          if run_match:
+              pattern = run_match.group(1) or "*"  # Default to all files
+              agent = run_match.group(2) or None
+              
+              if agent:
+                  output["message"] = f"Running {agent} on pattern {pattern}"
+              else:
+                  # If no agent specified, run all configured agents for this branch
+                  output["message"] = f"Running all configured agents on pattern {pattern}"
+              
+              output["command"] = "run"
+              output["pattern"] = pattern
+              output["agent"] = agent or "all"
+              # Don't save any config for run command
+          
+          # @agent-ignore pattern agent
+          ignore_match = re.search(r'@agent-ignore\s+([^\s]+)\s+([^\s]+)', comment)
+          if ignore_match:
+              pattern = ignore_match.group(1)
+              agent = ignore_match.group(2)
+              
+              # Add to exclude list
+              exclude_entry = {
+                  "pattern": pattern,
+                  "agent": agent,
+                  "excluded_by": user,
+                  "excluded_at": datetime.utcnow().isoformat() + "Z",
+                  "pr": pr_number
+              }
+              
+              # Check if already in excludes
+              already_excluded = False
+              for exc in config["excludes"][pr_branch]:
+                  if exc["pattern"] == pattern and exc["agent"] == agent:
+                      already_excluded = True
+                      break
+              
+              if not already_excluded:
+                  config["excludes"][pr_branch].append(exclude_entry)
+                  output["message"] = f"Added to exclude list: {pattern} -> {agent}"
+                  
+                  # Save config
+                  with open(config_file, 'w') as f:
+                      yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+              else:
+                  output["message"] = f"Already in exclude list: {pattern} -> {agent}"
+              
+              output["command"] = "ignore"
+              output["pattern"] = pattern
+              output["agent"] = agent
+          
+          # @agent-list
+          if "@agent-list" in comment:
+              output["command"] = "list"
+              pr_watches = config["watches"].get(pr_branch, [])
+              pr_excludes = config["excludes"].get(pr_branch, [])
+              output["watches"] = pr_watches
+              output["excludes"] = pr_excludes
+              output["message"] = f"Found {len(pr_watches)} active watches and {len(pr_excludes)} excludes for PR #{pr_number}"
+          
+          # Output for GitHub Actions
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"command={output['command']}\n")
+              f.write(f"message={output['message']}\n")
+              if "pattern" in output:
+                  f.write(f"pattern={output['pattern']}\n")
+              if "agent" in output:
+                  f.write(f"agent={output['agent']}\n")
+              if "args" in output:
+                  f.write(f"args={output['args']}\n")
+              if "watches" in output:
+                  f.write(f"watches={json.dumps(output['watches'])}\n")
+              if "excludes" in output:
+                  f.write(f"excludes={json.dumps(output['excludes'])}\n")
           EOF
-          fi
           
-          # Parse and process commands
-          if [[ "$COMMENT" =~ @agent-watch[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)([[:space:]]+@[[:space:]]+(.+))? ]]; then
-            PATTERN="${BASH_REMATCH[1]}"
-            AGENT="${BASH_REMATCH[2]}"
-            ARGS="${BASH_REMATCH[4]}"
-            
-            # INFINITE LOOP PROTECTION
-            if [[ "$PATTERN" == *"agentwatch"* ]] || [[ "$PATTERN" == *".github/workflows"* ]]; then
-              echo "command=error" >> $GITHUB_OUTPUT
-              echo "message=Cannot watch protected pattern: $PATTERN" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            
-            echo "command=watch" >> $GITHUB_OUTPUT
-            echo "pattern=$PATTERN" >> $GITHUB_OUTPUT
-            echo "agent=$AGENT" >> $GITHUB_OUTPUT
-            echo "args=$ARGS" >> $GITHUB_OUTPUT
-            echo "message=Pattern $PATTERN registered for agent $AGENT" >> $GITHUB_OUTPUT
-            
-            # Add to config (simplified - in production use proper YAML tool)
-            echo "" >> "$CONFIG_FILE"
-            echo "# PR #$PR_NUM - $PR_BRANCH" >> "$CONFIG_FILE"
-            echo "# Added by @$USER at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$CONFIG_FILE"
-            echo "# Pattern: $PATTERN -> $AGENT" >> "$CONFIG_FILE"
-            
-          elif [[ "$COMMENT" =~ @agent-unwatch[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+) ]]; then
-            AGENT="${BASH_REMATCH[1]}"
-            PATTERN="${BASH_REMATCH[2]}"
-            
-            echo "command=unwatch" >> $GITHUB_OUTPUT
-            echo "pattern=$PATTERN" >> $GITHUB_OUTPUT
-            echo "agent=$AGENT" >> $GITHUB_OUTPUT
-            echo "message=Pattern $PATTERN removed for agent $AGENT" >> $GITHUB_OUTPUT
-            
-          elif [[ "$COMMENT" =~ @agent-list ]]; then
-            echo "command=list" >> $GITHUB_OUTPUT
-            echo "message=Listing all patterns" >> $GITHUB_OUTPUT
-            
-          else
-            echo "command=unknown" >> $GITHUB_OUTPUT
-            echo "message=Unknown command" >> $GITHUB_OUTPUT
-          fi
-          SCRIPT
+          python process_command.py
           
-          chmod +x manage_state.sh
-          ./manage_state.sh
-          
-      - name: Commit state changes to main
-        if: steps.process.outputs.command == 'watch' || steps.process.outputs.command == 'unwatch'
+      # Commit to MAIN branch (not for run command)
+      - name: Commit configuration changes to main
+        if: steps.process.outputs.command == 'watch' || steps.process.outputs.command == 'unwatch' || steps.process.outputs.command == 'ignore'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           git add .github/agentwatch.yml
           
-          if ! git diff --staged --quiet; then
-            git commit -m "AgentWatch: ${{ steps.process.outputs.command }} pattern
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update AgentWatch configuration for PR #${{ steps.pr.outputs.pr_number }}
             
+            Command: @agent-${{ steps.process.outputs.command }}
             Pattern: ${{ steps.process.outputs.pattern }}
             Agent: ${{ steps.process.outputs.agent }}
-            PR: #${{ steps.pr.outputs.pr_number }} (${{ steps.pr.outputs.head_ref }})
-            User: @${{ github.event.comment.user.login }}
+            Branch: ${{ steps.pr.outputs.head_ref }}
+            Triggered by: @${{ github.event.comment.user.login }}
             
-            [skip ci]"
+            [skip ci]"  # Skip CI to prevent infinite loops
             
             git push origin main
-            echo "State updated on main branch"
-          else
-            echo "No changes to commit"
           fi
           
-      - name: Trigger agent
-        if: steps.process.outputs.command == 'watch'
+      - name: Trigger agent workflow
+        if: steps.process.outputs.command == 'watch' || steps.process.outputs.command == 'run'
         run: |
+          COMMAND="${{ steps.process.outputs.command }}"
           AGENT="${{ steps.process.outputs.agent }}"
           PATTERN="${{ steps.process.outputs.pattern }}"
           ARGS="${{ steps.process.outputs.args }}"
+          PR_NUM="${{ steps.pr.outputs.pr_number }}"
           
-          echo "Would trigger agent: $AGENT for pattern: $PATTERN"
-          
-          # For promptexpert, we can trigger via workflow dispatch
-          if [ "$AGENT" = "promptexpert" ]; then
-            # Check if prompt-expert.yml exists
-            if gh workflow list | grep -q "prompt-expert"; then
-              echo "Triggering prompt-expert workflow..."
-              # gh workflow run prompt-expert.yml
+          if [ "$COMMAND" = "run" ]; then
+            echo "🚀 Immediately running agent: $AGENT on pattern: $PATTERN"
+            
+            # Get changed files in PR
+            CHANGED_FILES=$(gh pr diff $PR_NUM --name-only)
+            
+            # Filter files by pattern
+            MATCHED_FILES=""
+            for file in $CHANGED_FILES; do
+              if [[ "$file" == $PATTERN ]] || [[ "$PATTERN" == "*" ]]; then
+                MATCHED_FILES="$MATCHED_FILES $file"
+              fi
+            done
+            
+            if [ -z "$MATCHED_FILES" ]; then
+              echo "No files match pattern: $PATTERN"
+              exit 0
+            fi
+            
+            echo "Matched files: $MATCHED_FILES"
+            
+            # Trigger specific agent or all configured agents
+            if [ "$AGENT" != "all" ]; then
+              # Trigger specific agent
+              if [ "$AGENT" = "promptexpert" ]; then
+                echo "Triggering prompt-expert workflow..."
+                # Check if workflow exists and trigger it
+                if gh workflow list | grep -q "prompt-expert"; then
+                  # Post comment to trigger prompt-expert
+                  gh pr comment $PR_NUM --body "@promptexpert analyze files: $MATCHED_FILES"
+                fi
+              fi
+              # Add other agent triggers here
+            else
+              # Run all configured agents for this branch
+              echo "Would run all configured agents from .github/agentwatch.yml"
+              # This would read the config and trigger each agent
+            fi
+          else
+            # Original watch command behavior
+            echo "Triggering $AGENT for pattern $PATTERN (watch mode)"
+            
+            if [ "$AGENT" = "promptexpert" ]; then
+              echo "Would trigger prompt-expert workflow via dispatch"
+              # gh workflow run prompt-expert.yml \
+              #   -f pattern="$PATTERN" \
+              #   -f args="$ARGS" \
+              #   -f pr="$PR_NUM"
             fi
           fi
         env:
@@ -170,36 +376,85 @@ jobs:
             let body = '';
             
             if (command === 'error') {
-              body = `❌ **AgentWatch Error**\n\n${message}`;
+              body = message;  // Error message about protected patterns
             } else if (command === 'watch') {
-              body = `✅ **AgentWatch Pattern Added**
+              body = `✅ **AgentWatch Pattern Saved to Main**
               
               📁 **Pattern**: \`${pattern}\`
               🤖 **Agent**: ${agent}
               ⚙️ **Args**: ${args || 'none'}
-              📝 **State**: Saved to \`.github/agentwatch.yml\` on \`main\` branch
+              🌳 **Branch**: Monitoring PR #${{ steps.pr.outputs.pr_number }} (\`${{ steps.pr.outputs.head_ref }}\`)
+              📝 **Config**: Updated \`.github/agentwatch.yml\` on \`main\` branch
               
-              This pattern will be monitored for PR #${{ steps.pr.outputs.pr_number }}.
-              Use \`@agent-unwatch ${agent} ${pattern}\` to remove.`;
+              ${message}
+              
+              This pattern is now active. Use \`@agent-unwatch ${agent} ${pattern}\` to remove.`;
               
             } else if (command === 'unwatch') {
-              body = `✅ **AgentWatch Pattern Removed**
+              body = `✅ **AgentWatch Pattern Removed from Main**
+              
+              ${message}
+              
+              📝 **Config**: Updated \`.github/agentwatch.yml\` on \`main\` branch`;
+              
+            } else if (command === 'run') {
+              body = `🚀 **Agent Run Triggered**
               
               📁 **Pattern**: \`${pattern}\`
               🤖 **Agent**: ${agent}
-              📝 **State**: Updated in \`.github/agentwatch.yml\` on \`main\` branch`;
+              🎯 **Mode**: Immediate execution (no state changes)
+              
+              ${message}
+              
+              The agent will analyze files matching the pattern in this PR.`;
+              
+            } else if (command === 'ignore') {
+              body = `🚫 **AgentWatch Pattern Ignored**
+              
+              📁 **Pattern**: \`${pattern}\`
+              🤖 **Agent**: ${agent}
+              📝 **Config**: Added to exclude list in \`.github/agentwatch.yml\` on \`main\` branch
+              
+              ${message}
+              
+              This pattern/agent combination will be excluded from automatic monitoring.`;
               
             } else if (command === 'list') {
-              body = `📋 **AgentWatch Patterns**
+              const watches = ${{ steps.process.outputs.watches || '[]' }};
+              const excludes = ${{ steps.process.outputs.excludes || '[]' }};
               
-              Check \`.github/agentwatch.yml\` on \`main\` branch for all configured patterns.`;
+              body = `📋 **AgentWatch Configuration for PR #${{ steps.pr.outputs.pr_number }}**\n\n`;
               
+              if (watches.length > 0) {
+                body += `✅ **Active Watches:**\n\n`;
+                watches.forEach((w, i) => {
+                  body += `${i + 1}. **Pattern**: \`${w.pattern}\`\n`;
+                  body += `   **Agent**: ${w.agent}`;
+                  if (w.args) body += ` | **Args**: ${w.args}`;
+                  body += `\n   **Added by**: @${w.added_by} on ${new Date(w.added_at).toLocaleDateString()}\n\n`;
+                });
+              } else {
+                body += `ℹ️ No active watches configured.\n\n`;
+              }
+              
+              if (excludes.length > 0) {
+                body += `🚫 **Excluded Patterns:**\n\n`;
+                excludes.forEach((e, i) => {
+                  body += `${i + 1}. **Pattern**: \`${e.pattern}\` | **Agent**: ${e.agent}\n`;
+                  body += `   **Excluded by**: @${e.excluded_by} on ${new Date(e.excluded_at).toLocaleDateString()}\n\n`;
+                });
+              }
+              
+              body += `\n📝 Configuration stored in \`.github/agentwatch.yml\` on \`main\` branch`;
             } else {
-              body = `❓ **AgentWatch Commands**
+              body = `❌ **Unknown AgentWatch Command**
               
-              - \`@agent-watch <pattern> <agent> @ <args>\` - Add pattern
-              - \`@agent-unwatch <agent> <pattern>\` - Remove pattern  
-              - \`@agent-list\` - List all patterns`;
+              Available commands:
+              - \`@agent-watch <pattern> <agent> @ <args>\` - Add pattern to watch list
+              - \`@agent-unwatch <agent> <pattern>\` - Remove from watches or add to excludes
+              - \`@agent-ignore <pattern> <agent>\` - Add pattern to exclude list
+              - \`@agent-run [pattern] [agent]\` - Run agent immediately (no state changes)
+              - \`@agent-list\` - List all watches and excludes`;
             }
             
             await github.rest.issues.createComment({
@@ -208,3 +463,68 @@ jobs:
               issue_number: context.issue.number,
               body: body
             });
+            
+  # Process file changes when PR is updated
+  check-patterns:
+    if: |
+      github.event_name == 'pull_request' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+        
+      - name: Setup Python for pattern checking
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+          
+      - name: Install PyYAML
+        run: pip install pyyaml
+        
+      - name: Check for watch patterns
+        run: |
+          cat > check_patterns.py << 'EOF'
+          import yaml
+          import json
+          import sys
+          import os
+          import fnmatch
+          
+          config_file = ".github/agentwatch.yml"
+          pr_branch = "${{ github.event.pull_request.head.ref }}"
+          
+          if not os.path.exists(config_file):
+              print("No AgentWatch configuration on main branch")
+              sys.exit(0)
+          
+          with open(config_file, 'r') as f:
+              config = yaml.safe_load(f) or {"watches": {}, "excludes": {}}
+          
+          watches = config.get("watches", {}).get(pr_branch, [])
+          excludes = config.get("excludes", {}).get(pr_branch, [])
+          
+          print(f"Found {len(watches)} watches and {len(excludes)} excludes for branch: {pr_branch}")
+          
+          # Get changed files (this would come from GitHub API)
+          # For now, just log what we would check
+          for watch in watches:
+              pattern = watch["pattern"]
+              agent = watch["agent"]
+              
+              # Check if this is excluded
+              is_excluded = False
+              for exclude in excludes:
+                  if exclude["pattern"] == pattern and exclude["agent"] == agent:
+                      print(f"Skipping excluded: {pattern} -> {agent}")
+                      is_excluded = True
+                      break
+              
+              if not is_excluded:
+                  print(f"Would check pattern: {pattern} for agent: {agent}")
+                  # Here we would match against changed files and trigger agents
+          EOF
+          
+          python check_patterns.py
