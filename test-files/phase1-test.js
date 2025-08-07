@@ -29,4 +29,4 @@ class Phase1Service {
   }
 }
 
-module.exports = Phase1Service;
+module.exports = Phase1Service;// Trigger agent after watcher added
