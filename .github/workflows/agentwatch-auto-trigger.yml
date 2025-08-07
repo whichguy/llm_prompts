@@ -11,8 +11,13 @@ permissions:
 jobs:
   check-watchers:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     steps:
+      - name: Debug Start
+        run: |
+          echo "=== AgentWatch Auto Trigger Started ==="
+          echo "Event: ${{ github.event_name }}"
+          echo "PR: ${{ github.event.pull_request.number }}"
+          
       - name: Checkout
         uses: actions/checkout@v4
         
