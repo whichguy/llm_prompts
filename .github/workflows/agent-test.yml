@@ -1,0 +1,24 @@
+name: Agent Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  issue_comment:
+    types: [created]
+
+jobs:
+  test:
+    if: >
+      github.event_name != 'issue_comment' ||
+      contains(github.event.comment.body, '@agent-test')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: whichguy/agentwatch@main
+        with:
+          command: test
+          github-token: ${{ secrets.GITHUB_TOKEN }}

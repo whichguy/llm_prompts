@@ -1,0 +1,20 @@
+name: Agent Format
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  format:
+    if: contains(github.event.comment.body, '@agent-format')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: whichguy/agentwatch@main
+        with:
+          command: format
+          github-token: ${{ secrets.GITHUB_TOKEN }}
