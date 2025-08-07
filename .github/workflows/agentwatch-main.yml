@@ -195,6 +195,23 @@ jobs:
               output["pattern"] = pattern
               output["agent"] = agent
           
+          # @agent-run [pattern] [agent] - Run agent immediately without state changes
+          run_match = re.search(r'@agent-run(?:\s+([^\s]+))?(?:\s+([^\s]+))?', comment)
+          if run_match:
+              pattern = run_match.group(1) or "*"  # Default to all files
+              agent = run_match.group(2) or None
+              
+              if agent:
+                  output["message"] = f"Running {agent} on pattern {pattern}"
+              else:
+                  # If no agent specified, run all configured agents for this branch
+                  output["message"] = f"Running all configured agents on pattern {pattern}"
+              
+              output["command"] = "run"
+              output["pattern"] = pattern
+              output["agent"] = agent or "all"
+              # Don't save any config for run command
+          
           # @agent-ignore pattern agent
           ignore_match = re.search(r'@agent-ignore\s+([^\s]+)\s+([^\s]+)', comment)
           if ignore_match:
@@ -258,7 +275,7 @@ jobs:
           
           python process_command.py
           
-      # Commit to MAIN branch
+      # Commit to MAIN branch (not for run command)
       - name: Commit configuration changes to main
         if: steps.process.outputs.command == 'watch' || steps.process.outputs.command == 'unwatch' || steps.process.outputs.command == 'ignore'
         run: |
@@ -284,22 +301,63 @@ jobs:
           fi
           
       - name: Trigger agent workflow
-        if: steps.process.outputs.command == 'watch'
+        if: steps.process.outputs.command == 'watch' || steps.process.outputs.command == 'run'
         run: |
-          echo "Triggering ${{ steps.process.outputs.agent }} for pattern ${{ steps.process.outputs.pattern }}"
-          
-          # For prompt-expert, post the command (but not as github-actions bot)
+          COMMAND="${{ steps.process.outputs.command }}"
           AGENT="${{ steps.process.outputs.agent }}"
           PATTERN="${{ steps.process.outputs.pattern }}"
           ARGS="${{ steps.process.outputs.args }}"
+          PR_NUM="${{ steps.pr.outputs.pr_number }}"
           
-          # Create a dispatch event instead of comment to avoid loops
-          if [ "$AGENT" = "promptexpert" ]; then
-            echo "Would trigger prompt-expert workflow via dispatch"
-            # gh workflow run prompt-expert.yml \
-            #   -f pattern="$PATTERN" \
-            #   -f args="$ARGS" \
-            #   -f pr="${{ steps.pr.outputs.pr_number }}"
+          if [ "$COMMAND" = "run" ]; then
+            echo "🚀 Immediately running agent: $AGENT on pattern: $PATTERN"
+            
+            # Get changed files in PR
+            CHANGED_FILES=$(gh pr diff $PR_NUM --name-only)
+            
+            # Filter files by pattern
+            MATCHED_FILES=""
+            for file in $CHANGED_FILES; do
+              if [[ "$file" == $PATTERN ]] || [[ "$PATTERN" == "*" ]]; then
+                MATCHED_FILES="$MATCHED_FILES $file"
+              fi
+            done
+            
+            if [ -z "$MATCHED_FILES" ]; then
+              echo "No files match pattern: $PATTERN"
+              exit 0
+            fi
+            
+            echo "Matched files: $MATCHED_FILES"
+            
+            # Trigger specific agent or all configured agents
+            if [ "$AGENT" != "all" ]; then
+              # Trigger specific agent
+              if [ "$AGENT" = "promptexpert" ]; then
+                echo "Triggering prompt-expert workflow..."
+                # Check if workflow exists and trigger it
+                if gh workflow list | grep -q "prompt-expert"; then
+                  # Post comment to trigger prompt-expert
+                  gh pr comment $PR_NUM --body "@promptexpert analyze files: $MATCHED_FILES"
+                fi
+              fi
+              # Add other agent triggers here
+            else
+              # Run all configured agents for this branch
+              echo "Would run all configured agents from .github/agentwatch.yml"
+              # This would read the config and trigger each agent
+            fi
+          else
+            # Original watch command behavior
+            echo "Triggering $AGENT for pattern $PATTERN (watch mode)"
+            
+            if [ "$AGENT" = "promptexpert" ]; then
+              echo "Would trigger prompt-expert workflow via dispatch"
+              # gh workflow run prompt-expert.yml \
+              #   -f pattern="$PATTERN" \
+              #   -f args="$ARGS" \
+              #   -f pr="$PR_NUM"
+            fi
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -338,6 +396,17 @@ jobs:
               ${message}
               
               📝 **Config**: Updated \`.github/agentwatch.yml\` on \`main\` branch`;
+              
+            } else if (command === 'run') {
+              body = `🚀 **Agent Run Triggered**
+              
+              📁 **Pattern**: \`${pattern}\`
+              🤖 **Agent**: ${agent}
+              🎯 **Mode**: Immediate execution (no state changes)
+              
+              ${message}
+              
+              The agent will analyze files matching the pattern in this PR.`;
               
             } else if (command === 'ignore') {
               body = `🚫 **AgentWatch Pattern Ignored**
@@ -384,6 +453,7 @@ jobs:
               - \`@agent-watch <pattern> <agent> @ <args>\` - Add pattern to watch list
               - \`@agent-unwatch <agent> <pattern>\` - Remove from watches or add to excludes
               - \`@agent-ignore <pattern> <agent>\` - Add pattern to exclude list
+              - \`@agent-run [pattern] [agent]\` - Run agent immediately (no state changes)
               - \`@agent-list\` - List all watches and excludes`;
             }
             
