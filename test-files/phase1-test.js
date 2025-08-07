@@ -18,4 +18,4 @@ function testPhase1() {
 }
 
 module.exports = { testPhase1 };
-// Test trigger - checking if workflow now triggers correctly
+// Phase 1: Testing baseline - no watchers should trigger
