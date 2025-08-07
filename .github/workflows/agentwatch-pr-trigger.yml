@@ -1,22 +1,15 @@
-name: AgentWatch Auto-Trigger
+name: AgentWatch PR Trigger
 on:
   pull_request:
-    types: [opened, synchronize]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to check'
-        required: true
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
-  issues: write
   pull-requests: write
+  issues: write
 
 jobs:
-  check-and-run:
-    # Only run on pull_request events or manual trigger
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+  check-watchers:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -38,21 +31,15 @@ jobs:
             const yaml = require('js-yaml');
             const minimatch = require('minimatch');
             
-            // Get PR number
-            const prNumber = context.payload.pull_request?.number || '${{ github.event.inputs.pr_number }}';
-            
-            if (!prNumber) {
-              console.log('No PR number found');
-              return;
-            }
-            
+            console.log('AgentWatch PR Trigger started');
+            const prNumber = context.payload.pull_request.number;
             console.log(`Checking PR #${prNumber}`);
             
             // Get changed files
             const { data: files } = await github.rest.pulls.listFiles({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: parseInt(prNumber)
+              pull_number: prNumber
             });
             
             const changedFiles = files.map(f => f.filename);
@@ -96,30 +83,38 @@ jobs:
               }
             }
             
+            // Remove checking label if it exists
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                name: 'agentwatch:checking'
+              });
+            } catch (e) {
+              // Label might not exist
+            }
+            
             // Run matched agents
             for (const agent of matchedAgents) {
               console.log(`Running agent: ${agent}`);
               
               // Add pending label
-              try {
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: parseInt(prNumber),
-                  labels: [`agent:pending:${agent}`]
-                });
-              } catch (e) {
-                console.log('Error adding pending label:', e.message);
-              }
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [`agent:pending:${agent}`]
+              });
               
-              // For now, just run the pr-summary agent inline
+              // For pr-summary agent
               if (agent === 'pr-summary') {
                 // Update to running label
                 try {
                   await github.rest.issues.removeLabel({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
-                    issue_number: parseInt(prNumber),
+                    issue_number: prNumber,
                     name: `agent:pending:${agent}`
                   });
                 } catch (e) {}
@@ -127,7 +122,7 @@ jobs:
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  issue_number: parseInt(prNumber),
+                  issue_number: prNumber,
                   labels: [`agent:running:${agent}`]
                 });
                 
@@ -135,7 +130,7 @@ jobs:
                 const { data: pr } = await github.rest.pulls.get({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  pull_number: parseInt(prNumber)
+                  pull_number: prNumber
                 });
                 
                 // Analyze PR
@@ -225,7 +220,7 @@ ${stats.todos > 0 ? '- Consider addressing TODOs before merging\n' : ''}${stats.
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  issue_number: parseInt(prNumber),
+                  issue_number: prNumber,
                   body: summary
                 });
                 
@@ -234,7 +229,7 @@ ${stats.todos > 0 ? '- Consider addressing TODOs before merging\n' : ''}${stats.
                   await github.rest.issues.removeLabel({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
-                    issue_number: parseInt(prNumber),
+                    issue_number: prNumber,
                     name: `agent:running:${agent}`
                   });
                 } catch (e) {}
@@ -242,7 +237,7 @@ ${stats.todos > 0 ? '- Consider addressing TODOs before merging\n' : ''}${stats.
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  issue_number: parseInt(prNumber),
+                  issue_number: prNumber,
                   labels: [`agent:reviewed:${agent}`]
                 });
                 
