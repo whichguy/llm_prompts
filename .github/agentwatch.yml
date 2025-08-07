@@ -20,3 +20,8 @@ excludes:
     excluded_by: whichguy
     excluded_at: '2025-08-07T13:35:39.031024Z'
     pr: 19
+  - pattern: '*.test.js'
+    agent: jest
+    excluded_by: whichguy
+    excluded_at: '2025-08-07T13:36:21.075683Z'
+    pr: 19
