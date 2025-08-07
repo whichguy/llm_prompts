@@ -1,4 +1,4 @@
-name: AgentWatch PR Trigger
+name: AgentWatch Auto Trigger
 on:
   pull_request:
     types: [opened, synchronize, reopened]
