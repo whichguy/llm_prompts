@@ -1,54 +1,53 @@
-watchers: []
+version: 1
 watches:
-  prompt-expert-test:
-  - pattern: '*.md'
-    agent: promptexpert
-    args: security
-    added_by: whichguy
-    added_at: '2025-08-07T13:09:43.999683Z'
-    pr: 18
-  agentwatch-stateful-validation:
-  - pattern: '*.css'
-    agent: stylelint
-    args: ''
-    added_by: whichguy
-    added_at: '2025-08-07T13:37:42.751367Z'
-    pr: 19
-    updated_by: whichguy
-    updated_at: '2025-08-07T13:37:50.022928Z'
-  - pattern: security-test-*.md
-    agent: promptexpert
-    args: security-analysis
-    added_by: whichguy
-    added_at: '2025-08-07T13:40:23.274273Z'
-    pr: 19
-  test-security-pattern:
-  - pattern: security-test-*.md
-    agent: promptexpert
-    args: security-analysis
-    added_by: whichguy
-    added_at: '2025-08-07T13:57:59.599139Z'
-    pr: 21
+- pattern: '*.md'
+  agent: promptexpert
+  args: security
+  added_by: whichguy
+  added_at: '2025-08-07T13:09:43.999683Z'
+  pr: 18
+  branch: prompt-expert-test
+- pattern: '*.css'
+  agent: stylelint
+  args: ''
+  added_by: whichguy
+  added_at: '2025-08-07T13:37:42.751367Z'
+  pr: 19
+  updated_by: whichguy
+  updated_at: '2025-08-07T13:37:50.022928Z'
+  branch: agentwatch-stateful-validation
+- pattern: security-test-*.md
+  agent: promptexpert
+  args: security-analysis
+  added_by: whichguy
+  added_at: '2025-08-07T13:40:23.274273Z'
+  pr: 19
+  branch: agentwatch-stateful-validation
+  updated_by: whichguy
+  updated_at: '2025-08-07T13:57:59.599139Z'
+  updated_from: test-security-pattern
 excludes:
-  agentwatch-stateful-validation:
-  - pattern: '*.js'
-    agent: eslint
-    excluded_by: whichguy
-    excluded_at: '2025-08-07T13:34:53.825594Z'
-    pr: 19
-  - pattern: '*.py'
-    agent: ruff
-    excluded_by: whichguy
-    excluded_at: '2025-08-07T13:35:39.031024Z'
-    pr: 19
-  - pattern: '*.test.js'
-    agent: jest
-    excluded_by: whichguy
-    excluded_at: '2025-08-07T13:36:21.075683Z'
-    pr: 19
-  - pattern: node_modules/**
-    agent: all
-    excluded_by: whichguy
-    excluded_at: '2025-08-07T13:38:05.253549Z'
-    pr: 19
-  test-security-pattern: []
+- pattern: '*.js'
+  agent: eslint
+  excluded_by: whichguy
+  excluded_at: '2025-08-07T13:34:53.825594Z'
+  pr: 19
+  branch: agentwatch-stateful-validation
+- pattern: '*.py'
+  agent: ruff
+  excluded_by: whichguy
+  excluded_at: '2025-08-07T13:35:39.031024Z'
+  pr: 19
+  branch: agentwatch-stateful-validation
+- pattern: '*.test.js'
+  agent: jest
+  excluded_by: whichguy
+  excluded_at: '2025-08-07T13:36:21.075683Z'
+  pr: 19
+  branch: agentwatch-stateful-validation
+- pattern: node_modules/**
+  agent: all
+  excluded_by: whichguy
+  excluded_at: '2025-08-07T13:38:05.253549Z'
+  pr: 19
+  branch: agentwatch-stateful-validation
