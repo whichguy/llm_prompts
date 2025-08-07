@@ -26,6 +26,12 @@ watches:
   updated_by: whichguy
   updated_at: '2025-08-07T13:57:59.599139Z'
   updated_from: test-security-pattern
+- pattern: auth-review.md
+  agent: promptexpert
+  args: authentication-security-analysis
+  added_by: whichguy
+  added_at: '2025-08-07T14:36:00.902446Z'
+  pr: 23
 excludes:
 - pattern: '*.js'
   agent: eslint
