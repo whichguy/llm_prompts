@@ -7,3 +7,7 @@ watches:
     added_by: whichguy
     added_at: '2025-08-07T13:09:43.999683Z'
     pr: 18
+
+# PR #19 - agentwatch-stateful-validation
+# Added by @whichguy at 2025-08-07T13:25:04Z
+# Pattern: *.md -> promptexpert
