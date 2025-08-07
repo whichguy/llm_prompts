@@ -18,4 +18,4 @@ function testPhase1() {
 }
 
 module.exports = { testPhase1 };
-// Phase 1: Final baseline test - verifying no agents trigger
+// Phase 1: Complete - confirming no agents trigger without watchers
