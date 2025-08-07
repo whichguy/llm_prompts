@@ -16,6 +16,12 @@ watches:
     pr: 19
     updated_by: whichguy
     updated_at: '2025-08-07T13:37:50.022928Z'
+  - pattern: security-test-*.md
+    agent: promptexpert
+    args: security-analysis
+    added_by: whichguy
+    added_at: '2025-08-07T13:40:23.274273Z'
+    pr: 19
 excludes:
   agentwatch-stateful-validation:
   - pattern: '*.js'
