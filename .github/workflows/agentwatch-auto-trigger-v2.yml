@@ -1,0 +1,301 @@
+name: AgentWatch Auto Trigger V2
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  check-watchers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug Start
+        run: |
+          echo "=== AgentWatch Auto Trigger V2 Started ==="
+          echo "Event: ${{ github.event_name }}"
+          echo "PR: ${{ github.event.pull_request.number }}"
+          echo "Action: ${{ github.event.action }}"
+          
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: npm install js-yaml minimatch
+        
+      - name: Check and Run Agents
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs').promises;
+            const yaml = require('js-yaml');
+            const minimatch = require('minimatch');
+            
+            // Main execution wrapper with comprehensive error handling
+            async function main() {
+              try {
+                console.log('=== AgentWatch Auto Trigger V2 Started ===');
+                console.log('Event:', context.eventName);
+                console.log('Action:', context.payload.action || 'N/A');
+                console.log('Repository:', `${context.repo.owner}/${context.repo.repo}`);
+                
+                // Validate PR context
+                if (!context.payload.pull_request) {
+                  const errorMsg = 'ERROR: No pull_request in context - this workflow should only run on pull_request events';
+                  console.error(errorMsg);
+                  core.setFailed(errorMsg);
+                  return;
+                }
+                
+                const prNumber = context.payload.pull_request.number;
+                const prTitle = context.payload.pull_request.title;
+                console.log(`Processing PR #${prNumber}: "${prTitle}"`);
+                
+                // Get changed files with error handling
+                let files;
+                try {
+                  console.log('Fetching changed files...');
+                  const response = await github.rest.pulls.listFiles({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: prNumber
+                  });
+                  files = response.data;
+                  console.log(`Found ${files.length} changed file(s)`);
+                } catch (error) {
+                  const errorMsg = `Failed to get PR files: ${error.message}`;
+                  console.error('ERROR:', errorMsg);
+                  console.error('Details:', error);
+                  core.setFailed(errorMsg);
+                  return;
+                }
+                
+                if (!files || files.length === 0) {
+                  console.log('No files changed in this PR - skipping');
+                  return;
+                }
+                
+                const changedFiles = files.map(f => f.filename);
+                console.log('Changed files:', JSON.stringify(changedFiles, null, 2));
+                
+                // Load configuration with detailed error handling
+                let config = { watchers: [] };
+                const configPath = '.github/agentwatch.yml';
+                
+                try {
+                  console.log(`Loading configuration from ${configPath}...`);
+                  const content = await fs.readFile(configPath, 'utf8');
+                  
+                  if (!content || content.trim() === '') {
+                    console.log('Config file is empty - no watchers configured');
+                    return;
+                  }
+                  
+                  config = yaml.load(content);
+                  
+                  if (!config) {
+                    console.log('Config file parsed to null/undefined - no watchers configured');
+                    return;
+                  }
+                  
+                  console.log(`Loaded config successfully`);
+                  console.log(`Config type: ${typeof config}`);
+                  console.log(`Has watchers property: ${config.hasOwnProperty('watchers')}`);
+                  
+                } catch (error) {
+                  if (error.code === 'ENOENT') {
+                    console.log('Config file not found - no watchers configured (expected for baseline testing)');
+                    return;
+                  } else if (error.name === 'YAMLException') {
+                    const errorMsg = `Invalid YAML in config file: ${error.message}`;
+                    console.error('ERROR:', errorMsg);
+                    core.setFailed(errorMsg);
+                    return;
+                  } else {
+                    console.log(`Config file error (${error.code || 'unknown'}): ${error.message}`);
+                    console.log('Continuing without watchers...');
+                    return;
+                  }
+                }
+                
+                // Validate configuration structure
+                if (!config || typeof config !== 'object') {
+                  const errorMsg = 'Invalid config: not an object';
+                  console.error('ERROR:', errorMsg);
+                  core.setFailed(errorMsg);
+                  return;
+                }
+                
+                if (!config.watchers) {
+                  console.log('No watchers property in config - skipping');
+                  return;
+                }
+                
+                if (!Array.isArray(config.watchers)) {
+                  const errorMsg = `Invalid config: watchers is not an array (got ${typeof config.watchers})`;
+                  console.error('ERROR:', errorMsg);
+                  core.setFailed(errorMsg);
+                  return;
+                }
+                
+                if (config.watchers.length === 0) {
+                  console.log('No watchers defined in config - skipping (expected for Phase 1)');
+                  return;
+                }
+                
+                console.log(`Found ${config.watchers.length} watcher(s) in configuration`);
+                
+                // Process watchers and find matches
+                const matchedAgents = new Set();
+                const errors = [];
+                
+                for (let i = 0; i < config.watchers.length; i++) {
+                  const watcher = config.watchers[i];
+                  
+                  // Validate watcher structure
+                  if (!watcher || typeof watcher !== 'object') {
+                    errors.push(`Watcher ${i}: not an object`);
+                    continue;
+                  }
+                  
+                  if (!watcher.agent) {
+                    errors.push(`Watcher ${i}: missing 'agent' property`);
+                    continue;
+                  }
+                  
+                  if (!watcher.pattern) {
+                    errors.push(`Watcher ${i}: missing 'pattern' property`);
+                    continue;
+                  }
+                  
+                  console.log(`\\nChecking watcher ${i + 1}/${config.watchers.length}:`);
+                  console.log(`  Agent: ${watcher.agent}`);
+                  console.log(`  Pattern: ${watcher.pattern}`);
+                  console.log(`  Exclude: ${JSON.stringify(watcher.exclude || [])}`);
+                  
+                  // Check for matches
+                  let matchedFiles = [];
+                  
+                  for (const file of changedFiles) {
+                    try {
+                      const isMatch = minimatch(file, watcher.pattern);
+                      
+                      if (!isMatch) {
+                        console.log(`    ${file} - no match`);
+                        continue;
+                      }
+                      
+                      // Check exclusions
+                      let excluded = false;
+                      if (Array.isArray(watcher.exclude)) {
+                        for (const excludePattern of watcher.exclude) {
+                          if (minimatch(file, excludePattern)) {
+                            console.log(`    ${file} - matched but excluded by: ${excludePattern}`);
+                            excluded = true;
+                            break;
+                          }
+                        }
+                      }
+                      
+                      if (!excluded) {
+                        console.log(`    ${file} - MATCHED`);
+                        matchedFiles.push(file);
+                      }
+                      
+                    } catch (error) {
+                      errors.push(`Pattern matching error for ${file} with pattern ${watcher.pattern}: ${error.message}`);
+                    }
+                  }
+                  
+                  if (matchedFiles.length > 0) {
+                    matchedAgents.add(watcher.agent);
+                    console.log(`  Result: Agent "${watcher.agent}" will be triggered for ${matchedFiles.length} file(s)`);
+                  } else {
+                    console.log(`  Result: No matches for this watcher`);
+                  }
+                }
+                
+                // Report any errors encountered
+                if (errors.length > 0) {
+                  console.warn('\\nWarnings encountered during watcher processing:');
+                  errors.forEach(err => console.warn(`  - ${err}`));
+                }
+                
+                // Process matched agents
+                if (matchedAgents.size === 0) {
+                  console.log('\\n✅ No agents matched for this PR - no actions needed');
+                  return;
+                }
+                
+                console.log(`\\n🎯 ${matchedAgents.size} agent(s) matched and will be triggered:`);
+                matchedAgents.forEach(agent => console.log(`  - ${agent}`));
+                
+                // Execute agents
+                const agentResults = [];
+                
+                for (const agent of matchedAgents) {
+                  console.log(`\\n📦 Processing agent: ${agent}`);
+                  
+                  try {
+                    // Add pending label
+                    const pendingLabel = `agent:pending:${agent}`;
+                    console.log(`  Adding label: ${pendingLabel}`);
+                    
+                    await github.rest.issues.addLabels({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: prNumber,
+                      labels: [pendingLabel]
+                    });
+                    
+                    console.log(`  ✅ Label added successfully`);
+                    
+                    // Agent-specific logic would go here
+                    if (agent === 'pr-summary') {
+                      console.log(`  ℹ️ PR Summary agent would execute here`);
+                      // Full PR summary implementation would be here
+                    } else {
+                      console.log(`  ℹ️ Unknown agent type: ${agent} - skipping execution`);
+                    }
+                    
+                    agentResults.push({ agent, status: 'success' });
+                    
+                  } catch (error) {
+                    console.error(`  ❌ Error processing agent ${agent}: ${error.message}`);
+                    agentResults.push({ agent, status: 'error', error: error.message });
+                  }
+                }
+                
+                // Summary
+                console.log('\\n=== AgentWatch Auto Trigger V2 Summary ===');
+                console.log(`Total watchers checked: ${config.watchers.length}`);
+                console.log(`Agents triggered: ${matchedAgents.size}`);
+                console.log('Results:');
+                agentResults.forEach(result => {
+                  if (result.status === 'success') {
+                    console.log(`  ✅ ${result.agent}: Success`);
+                  } else {
+                    console.log(`  ❌ ${result.agent}: Failed - ${result.error}`);
+                  }
+                });
+                
+                console.log('\\n✅ AgentWatch Auto Trigger V2 completed successfully');
+                
+              } catch (error) {
+                console.error('\\n❌ FATAL ERROR in AgentWatch Auto Trigger V2:');
+                console.error('Message:', error.message);
+                console.error('Stack:', error.stack);
+                core.setFailed(`AgentWatch Auto Trigger V2 failed: ${error.message}`);
+              }
+            }
+            
+            // Execute main function
+            await main();
