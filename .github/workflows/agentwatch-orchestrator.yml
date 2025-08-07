@@ -2,65 +2,54 @@ name: AgentWatch Orchestrator
 on:
   issue_comment:
     types: [created]
-  pull_request:
-    types: [opened, synchronize]
 
 permissions:
   contents: write
   issues: write  
   pull-requests: write
-  actions: read
 
 jobs:
   process-command:
-    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '@agent-')
-    runs-on: ubuntu-latest
-    outputs:
-      command: ${{ steps.parse.outputs.command }}
-      agent: ${{ steps.parse.outputs.agent }}
-      pattern: ${{ steps.parse.outputs.pattern }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Parse Command
-        id: parse
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const comment = context.payload.comment.body;
-            const match = comment.match(/@agent-(watch|unwatch|list)\s*(\S+)?\s*(.*)?/);
-            if (match) {
-              core.setOutput('command', match[1]);
-              core.setOutput('agent', match[2] || '');
-              core.setOutput('pattern', match[3] || '');
-            }
-
-  handle-command:
-    needs: process-command
-    if: needs.process-command.outputs.command
+    if: github.event.issue.pull_request && contains(github.event.comment.body, '@agent-')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-      - name: Install js-yaml
+          
+      - name: Install dependencies
         run: npm install js-yaml minimatch
-      - name: Handle Command
+        
+      - name: Process Command
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs').promises;
-            const path = require('path');
             const yaml = require('js-yaml');
+            const { execSync } = require('child_process');
             
-            const command = '${{ needs.process-command.outputs.command }}';
-            const agent = '${{ needs.process-command.outputs.agent }}';
-            const pattern = '${{ needs.process-command.outputs.pattern }}';
+            const comment = context.payload.comment.body;
+            const match = comment.match(/@agent-(watch|unwatch|list)\s*(\S+)?\s*(.*)?/);
+            
+            if (!match) {
+              console.log('No valid command found');
+              return;
+            }
+            
+            const command = match[1];
+            const agent = match[2] || '';
+            const pattern = match[3]?.trim() || '';
             const user = context.payload.comment.user.login;
             const prNumber = context.payload.issue.number;
+            
+            console.log(`Command: ${command}, Agent: ${agent}, Pattern: ${pattern}`);
             
             const configPath = '.github/agentwatch.yml';
             let config = { watchers: [] };
@@ -73,69 +62,47 @@ jobs:
             }
             
             let message = '';
+            let needsCommit = false;
             
             if (command === 'watch') {
-              const exists = config.watchers.some(w => 
-                w.agent === agent && w.pattern === pattern
-              );
-              
-              if (!exists) {
-                config.watchers.push({
-                  name: `${agent} for ${pattern}`,
-                  agent: agent,
-                  pattern: pattern,
-                  exclude: [],
-                  added_by: user,
-                  added_at: new Date().toISOString(),
-                  pr_number: prNumber
-                });
-                message = `✅ Watcher added:\n- Agent: ${agent}\n- Pattern: ${pattern}\n- Excludes: []`;
-                
-                // Save config
-                await fs.writeFile(configPath, yaml.dump(config));
-                
-                // Commit changes
-                const { execSync } = require('child_process');
-                execSync(`git config user.name "github-actions[bot]"`);
-                execSync(`git config user.email "github-actions[bot]@users.noreply.github.com"`);
-                execSync(`git add ${configPath}`);
-                execSync(`git commit -m "Update agentwatch config: ${command} ${agent} ${pattern}"`);
-                execSync(`git push`);
-                
-                // Trigger agent on current PR
-                await github.rest.repository.createDispatchEvent({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  event_type: 'run-agent',
-                  client_payload: {
-                    agent: agent,
-                    pr_number: prNumber
-                  }
-                });
+              if (!agent || !pattern) {
+                message = '❌ Usage: @agent-watch <agent-name> <file-pattern>';
               } else {
-                message = `⚠️ Watcher already exists for ${agent} on ${pattern}`;
+                const exists = config.watchers.some(w => 
+                  w.agent === agent && w.pattern === pattern
+                );
+                
+                if (!exists) {
+                  config.watchers.push({
+                    name: `${agent} for ${pattern}`,
+                    agent: agent,
+                    pattern: pattern,
+                    exclude: [],
+                    added_by: user,
+                    added_at: new Date().toISOString(),
+                    pr_number: prNumber
+                  });
+                  message = `✅ Watcher added:\n- Agent: ${agent}\n- Pattern: ${pattern}\n- Excludes: []`;
+                  needsCommit = true;
+                } else {
+                  message = `⚠️ Watcher already exists for ${agent} on ${pattern}`;
+                }
               }
             } else if (command === 'unwatch') {
-              const index = config.watchers.findIndex(w => 
-                w.agent === agent && w.pattern === pattern
-              );
-              
-              if (index !== -1) {
-                config.watchers.splice(index, 1);
-                message = `✅ Watcher removed:\n- Agent: ${agent}\n- Pattern: ${pattern}`;
-                
-                // Save config
-                await fs.writeFile(configPath, yaml.dump(config));
-                
-                // Commit changes
-                const { execSync } = require('child_process');
-                execSync(`git config user.name "github-actions[bot]"`);
-                execSync(`git config user.email "github-actions[bot]@users.noreply.github.com"`);
-                execSync(`git add ${configPath}`);
-                execSync(`git commit -m "Update agentwatch config: ${command} ${agent} ${pattern}"`);
-                execSync(`git push`);
+              if (!agent || !pattern) {
+                message = '❌ Usage: @agent-unwatch <agent-name> <file-pattern>';
               } else {
-                message = `⚠️ No watcher found for ${agent} on ${pattern}`;
+                const index = config.watchers.findIndex(w => 
+                  w.agent === agent && w.pattern === pattern
+                );
+                
+                if (index !== -1) {
+                  config.watchers.splice(index, 1);
+                  message = `✅ Watcher removed:\n- Agent: ${agent}\n- Pattern: ${pattern}`;
+                  needsCommit = true;
+                } else {
+                  message = `⚠️ No watcher found for ${agent} on ${pattern}`;
+                }
               }
             } else if (command === 'list') {
               if (config.watchers.length > 0) {
@@ -147,81 +114,24 @@ jobs:
               }
             }
             
-            // Post response
+            // Save config if needed
+            if (needsCommit) {
+              await fs.writeFile(configPath, yaml.dump(config));
+              
+              // Configure git
+              execSync('git config user.name "github-actions[bot]"');
+              execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
+              
+              // Commit and push
+              execSync(`git add ${configPath}`);
+              execSync(`git commit -m "Update agentwatch config: ${command} ${agent} ${pattern}"`);
+              execSync('git push');
+            }
+            
+            // Post response comment
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
               body: message
             });
-
-  check-watchers:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    outputs:
-      has_matches: ${{ steps.check.outputs.has_matches }}
-      matched_agents: ${{ steps.check.outputs.matched_agents }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-      - name: Install dependencies
-        run: npm install js-yaml minimatch
-      - name: Check Watchers
-        id: check
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs').promises;
-            const yaml = require('js-yaml');
-            const minimatch = require('minimatch');
-            
-            // Get changed files
-            const { data: files } = await github.rest.pulls.listFiles({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.payload.pull_request.number
-            });
-            
-            const changedFiles = files.map(f => f.filename);
-            console.log('Changed files:', changedFiles);
-            
-            // Load config
-            let config = { watchers: [] };
-            try {
-              const content = await fs.readFile('.github/agentwatch.yml', 'utf8');
-              config = yaml.load(content) || { watchers: [] };
-              console.log('Loaded config with watchers:', config.watchers.length);
-            } catch (e) {
-              console.log('No config file found');
-            }
-            
-            // Find matching watchers
-            const matchedAgents = new Set();
-            for (const watcher of config.watchers) {
-              const matched = changedFiles.some(file => {
-                if (!minimatch(file, watcher.pattern)) return false;
-                for (const exclude of watcher.exclude || []) {
-                  if (minimatch(file, exclude)) return false;
-                }
-                return true;
-              });
-              
-              if (matched) {
-                matchedAgents.add(watcher.agent);
-                console.log(`Agent ${watcher.agent} matched for pattern ${watcher.pattern}`);
-              }
-            }
-            
-            const agentList = Array.from(matchedAgents);
-            core.setOutput('has_matches', agentList.length > 0 ? 'true' : 'false');
-            core.setOutput('matched_agents', JSON.stringify(agentList));
-
-  run-pr-summary:
-    needs: check-watchers
-    if: needs.check-watchers.outputs.has_matches == 'true' && contains(needs.check-watchers.outputs.matched_agents, 'pr-summary')
-    uses: ./.github/workflows/agent-pr-summary.yml
-    with:
-      pr_number: ${{ github.event.pull_request.number }}
