@@ -1,0 +1,16 @@
+name: Prompt Expert Integration
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_comment:
+    types: [created]
+
+jobs:
+  trigger-prompt-expert:
+    if: contains(github.event.comment.body, '@agent-watch') && contains(github.event.comment.body, 'promptexpert')
+    uses: whichguy/agentwatch/.github/workflows/prompt-expert.yml@main
+    with:
+      expert: security
+      pattern: "*.md"
+    secrets: inherit
