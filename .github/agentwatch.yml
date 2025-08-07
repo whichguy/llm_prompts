@@ -9,4 +9,9 @@ watches:
     pr: 18
   agentwatch-stateful-validation: []
 excludes:
-  agentwatch-stateful-validation: []
+  agentwatch-stateful-validation:
+  - pattern: '*.js'
+    agent: eslint
+    excluded_by: whichguy
+    excluded_at: '2025-08-07T13:34:53.825594Z'
+    pr: 19
