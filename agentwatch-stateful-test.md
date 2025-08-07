@@ -36,6 +36,10 @@ const apiKey = "sk-test-1234567890abcdef";
 eval(userInput); // Code injection vulnerability
 ```
 
+## Test Update 1
+
+Adding content to trigger PR update.
+
 ## Expected Behaviors
 
 1. **State Persistence**: All changes should be saved to `.github/agentwatch.yml` on the main branch
