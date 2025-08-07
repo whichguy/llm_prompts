@@ -1,1 +1,8 @@
-watchers: []
+watchers:
+  - name: pr-summary for test-files/*.js
+    agent: pr-summary
+    pattern: test-files/*.js
+    exclude: []
+    added_by: whichguy
+    added_at: '2025-08-07T05:10:00Z'
+    pr_number: 13
