@@ -24,7 +24,7 @@ jobs:
           node-version: '18'
           
       - name: Install dependencies
-        run: npm install js-yaml minimatch
+        run: npm install js-yaml minimatch shell-quote
         
       - name: Process Command
         uses: actions/github-script@v7
@@ -34,104 +34,272 @@ jobs:
             const fs = require('fs').promises;
             const yaml = require('js-yaml');
             const { execSync } = require('child_process');
-            
-            const comment = context.payload.comment.body;
-            const match = comment.match(/@agent-(watch|unwatch|list)\s*(\S+)?\s*(.*)?/);
-            
-            if (!match) {
-              console.log('No valid command found');
-              return;
-            }
-            
-            const command = match[1];
-            const agent = match[2] || '';
-            const pattern = match[3]?.trim() || '';
-            const user = context.payload.comment.user.login;
-            const prNumber = context.payload.issue.number;
-            
-            console.log(`Command: ${command}, Agent: ${agent}, Pattern: ${pattern}`);
-            
-            const configPath = '.github/agentwatch.yml';
-            let config = { watchers: [] };
+            const shellQuote = require('shell-quote');
             
             try {
-              const content = await fs.readFile(configPath, 'utf8');
-              config = yaml.load(content) || { watchers: [] };
-            } catch (e) {
-              console.log('Config file not found, using default');
-            }
-            
-            let message = '';
-            let needsCommit = false;
-            
-            if (command === 'watch') {
-              if (!agent || !pattern) {
-                message = '❌ Usage: @agent-watch <agent-name> <file-pattern>';
-              } else {
-                const exists = config.watchers.some(w => 
-                  w.agent === agent && w.pattern === pattern
-                );
-                
-                if (!exists) {
-                  config.watchers.push({
-                    name: `${agent} for ${pattern}`,
-                    agent: agent,
-                    pattern: pattern,
-                    exclude: [],
-                    added_by: user,
-                    added_at: new Date().toISOString(),
-                    pr_number: prNumber
+              const comment = context.payload.comment.body;
+              console.log('Processing comment:', comment);
+              
+              // Parse command with proper quote handling
+              const commandMatch = comment.match(/@agent-(\w+)(?:\s+(.*))?/);
+              
+              if (!commandMatch) {
+                console.log('No valid command found');
+                return;
+              }
+              
+              const command = commandMatch[1];
+              const argsString = commandMatch[2] || '';
+              
+              // Parse arguments with shell-style quote handling
+              const args = argsString ? shellQuote.parse(argsString) : [];
+              const agent = args[0] || '';
+              const pattern = args[1] || '';
+              const excludePatterns = args.slice(2); // Additional args are exclusion patterns
+              
+              const user = context.payload.comment.user.login;
+              const prNumber = context.payload.issue.number;
+              
+              console.log(`Command: ${command}`);
+              console.log(`Agent: ${agent}`);
+              console.log(`Pattern: ${pattern}`);
+              console.log(`Exclude: ${excludePatterns.join(', ')}`);
+              console.log(`User: ${user}`);
+              console.log(`PR: ${prNumber}`);
+              
+              const configPath = '.github/agentwatch.yml';
+              let config = { watchers: [] };
+              
+              // Load existing config
+              try {
+                const content = await fs.readFile(configPath, 'utf8');
+                config = yaml.load(content) || { watchers: [] };
+                console.log(`Loaded config with ${config.watchers.length} watchers`);
+              } catch (e) {
+                if (e.code !== 'ENOENT') {
+                  console.error('Error loading config:', e.message);
+                }
+                console.log('Starting with empty config');
+              }
+              
+              let message = '';
+              let needsCommit = false;
+              
+              switch (command) {
+                case 'watch':
+                  if (!agent || !pattern) {
+                    message = `❌ **Usage:** \`@agent-watch <agent-name> <file-pattern> [exclude-patterns...]\`
+                    
+Examples:
+\`\`\`
+@agent-watch pr-summary "src/**/*.js"
+@agent-watch code-review "*.py" "**/__pycache__/**"
+@agent-watch security-scan "**/*.yml" ".github/workflows/*"
+\`\`\`
+
+Available agents: pr-summary, code-review, security-scan`;
+                  } else {
+                    // Check if watcher already exists
+                    const exists = config.watchers.some(w => 
+                      w.agent === agent && w.pattern === pattern
+                    );
+                    
+                    if (!exists) {
+                      const watcher = {
+                        name: `${agent} for ${pattern}`,
+                        agent: agent,
+                        pattern: pattern,
+                        exclude: excludePatterns,
+                        added_by: user,
+                        added_at: new Date().toISOString(),
+                        pr_number: prNumber
+                      };
+                      
+                      config.watchers.push(watcher);
+                      needsCommit = true;
+                      
+                      message = `✅ **Added watcher:**
+- **Agent:** ${agent}
+- **Pattern:** \`${pattern}\`
+- **Exclude:** ${excludePatterns.length > 0 ? excludePatterns.map(p => `\`${p}\``).join(', ') : 'none'}
+- **Added by:** @${user}
+- **PR:** #${prNumber}`;
+                      
+                      console.log('Added watcher:', watcher);
+                    } else {
+                      message = `⚠️ **Watcher already exists** for ${agent} on \`${pattern}\``;
+                    }
+                  }
+                  break;
+                  
+                case 'unwatch':
+                  if (!agent || !pattern) {
+                    message = `❌ **Usage:** \`@agent-unwatch <agent-name> <file-pattern>\`
+                    
+Example: \`@agent-unwatch pr-summary "src/**/*.js"\``;
+                  } else {
+                    const beforeCount = config.watchers.length;
+                    config.watchers = config.watchers.filter(w => 
+                      !(w.agent === agent && w.pattern === pattern)
+                    );
+                    
+                    if (config.watchers.length < beforeCount) {
+                      needsCommit = true;
+                      message = `✅ **Removed watcher** for ${agent} on \`${pattern}\``;
+                      console.log(`Removed watcher for ${agent} on ${pattern}`);
+                    } else {
+                      message = `⚠️ **No watcher found** for ${agent} on \`${pattern}\``;
+                    }
+                  }
+                  break;
+                  
+                case 'list':
+                  if (config.watchers.length === 0) {
+                    message = `📋 **No watchers configured**
+                    
+Use \`@agent-watch <agent> <pattern>\` to add watchers.`;
+                  } else {
+                    const watcherList = config.watchers.map(w => 
+                      `- **${w.agent}** on \`${w.pattern}\`${w.exclude?.length ? ` (excluding: ${w.exclude.map(e => `\`${e}\``).join(', ')})` : ''} - by @${w.added_by} in #${w.pr_number}`
+                    ).join('\n');
+                    
+                    message = `📋 **Active Watchers** (${config.watchers.length}):
+${watcherList}`;
+                  }
+                  break;
+                  
+                case 'help':
+                  message = `## 🤖 AgentWatch Commands
+
+**Add a watcher:**
+\`@agent-watch <agent> <pattern> [exclude...]\`
+
+**Remove a watcher:**
+\`@agent-unwatch <agent> <pattern>\`
+
+**List all watchers:**
+\`@agent-list\`
+
+**Available Agents:**
+- \`pr-summary\` - Generates PR summary reports
+- \`code-review\` - Performs code review (coming soon)
+- \`security-scan\` - Security analysis (coming soon)
+
+**Pattern Examples:**
+- \`"src/**/*.js"\` - All JS files in src
+- \`"*.yml"\` - All YAML files in root
+- \`"test/**/*"\` - All files in test directory
+
+**Tips:**
+- Use quotes for patterns with special characters
+- Multiple exclude patterns can be specified
+- Patterns use minimatch (glob) syntax`;
+                  break;
+                  
+                default:
+                  message = `❌ **Unknown command:** \`@agent-${command}\`
+                  
+Use \`@agent-help\` for available commands.`;
+              }
+              
+              // Update config file if needed
+              if (needsCommit) {
+                try {
+                  const yamlContent = yaml.dump(config, { 
+                    indent: 2,
+                    lineWidth: -1,
+                    noRefs: true
                   });
-                  message = `✅ Watcher added:\n- Agent: ${agent}\n- Pattern: ${pattern}\n- Excludes: []`;
-                  needsCommit = true;
-                } else {
-                  message = `⚠️ Watcher already exists for ${agent} on ${pattern}`;
+                  
+                  await fs.writeFile(configPath, yamlContent, 'utf8');
+                  console.log('Updated config file');
+                  
+                  // Commit changes
+                  try {
+                    execSync('git config user.name "github-actions[bot]"');
+                    execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
+                    execSync(`git add ${configPath}`);
+                    execSync(`git commit -m "Update AgentWatch config via @agent-${command} by @${user}"`);
+                    execSync('git push');
+                    
+                    console.log('Committed config changes');
+                    message += '\n\n✅ Configuration updated and committed.';
+                  } catch (gitError) {
+                    console.error('Git error:', gitError.message);
+                    message += '\n\n⚠️ Configuration updated but commit failed. Changes may not persist.';
+                  }
+                } catch (writeError) {
+                  console.error('Failed to write config:', writeError.message);
+                  message = `❌ **Error updating configuration:** ${writeError.message}`;
                 }
               }
-            } else if (command === 'unwatch') {
-              if (!agent || !pattern) {
-                message = '❌ Usage: @agent-unwatch <agent-name> <file-pattern>';
-              } else {
-                const index = config.watchers.findIndex(w => 
-                  w.agent === agent && w.pattern === pattern
-                );
+              
+              // Post response comment
+              if (message) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: message
+                });
                 
-                if (index !== -1) {
-                  config.watchers.splice(index, 1);
-                  message = `✅ Watcher removed:\n- Agent: ${agent}\n- Pattern: ${pattern}`;
-                  needsCommit = true;
-                } else {
-                  message = `⚠️ No watcher found for ${agent} on ${pattern}`;
+                console.log('Posted response comment');
+              }
+              
+              // If a watcher was added, check if it matches current PR files
+              if (command === 'watch' && needsCommit) {
+                console.log('Checking if new watcher matches current PR files...');
+                
+                try {
+                  const { data: files } = await github.rest.pulls.listFiles({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: prNumber
+                  });
+                  
+                  const minimatch = require('minimatch');
+                  const matchedFiles = files.filter(f => {
+                    const matches = minimatch(f.filename, pattern);
+                    if (!matches) return false;
+                    
+                    // Check exclusions
+                    for (const exclude of excludePatterns) {
+                      if (minimatch(f.filename, exclude)) return false;
+                    }
+                    return true;
+                  });
+                  
+                  if (matchedFiles.length > 0) {
+                    console.log(`New watcher matches ${matchedFiles.length} file(s) in this PR`);
+                    
+                    // Add label to trigger agent
+                    await github.rest.issues.addLabels({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: prNumber,
+                      labels: [`agent:pending:${agent}`]
+                    });
+                    
+                    // Note: The actual agent execution would be handled by the auto-trigger workflow
+                    // or a separate agent runner
+                  }
+                } catch (matchError) {
+                  console.error('Error checking PR files:', matchError.message);
                 }
               }
-            } else if (command === 'list') {
-              if (config.watchers.length > 0) {
-                message = '📋 Active watchers:\n' + config.watchers.map((w, i) => 
-                  `${i+1}. **${w.agent}** watching \`${w.pattern}\` (added by @${w.added_by})`
-                ).join('\n');
-              } else {
-                message = '📋 No active watchers';
-              }
-            }
-            
-            // Save config if needed
-            if (needsCommit) {
-              await fs.writeFile(configPath, yaml.dump(config));
               
-              // Configure git
-              execSync('git config user.name "github-actions[bot]"');
-              execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
+            } catch (error) {
+              console.error('Fatal error in orchestrator:', error);
               
-              // Commit and push
-              execSync(`git add ${configPath}`);
-              execSync(`git commit -m "Update agentwatch config: ${command} ${agent} ${pattern}"`);
-              execSync('git push');
+              // Post error comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                body: `❌ **Error processing command:** ${error.message}
+                
+Please check the command syntax and try again. Use \`@agent-help\` for help.`
+              });
+              
+              core.setFailed(`Orchestrator failed: ${error.message}`);
             }
-            
-            // Post response comment
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              body: message
-            });

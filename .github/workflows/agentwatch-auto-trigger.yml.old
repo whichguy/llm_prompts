@@ -1,0 +1,286 @@
+name: AgentWatch Auto Trigger
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  check-watchers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug Start
+        run: |
+          echo "=== AgentWatch Auto Trigger Started ==="
+          echo "Event: ${{ github.event_name }}"
+          echo "PR: ${{ github.event.pull_request.number }}"
+          
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: npm install js-yaml minimatch
+        
+      - name: Check and Run Agents
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs').promises;
+            const yaml = require('js-yaml');
+            const minimatch = require('minimatch');
+            
+            console.log('=== AgentWatch Auto Trigger Started ===');
+            console.log('Event:', context.eventName);
+            console.log('Action:', context.payload.action || 'N/A');
+            const prNumber = context.payload.pull_request.number;
+            console.log(`Checking PR #${prNumber}`);
+            
+            // Get changed files
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            
+            const changedFiles = files.map(f => f.filename);
+            console.log('Changed files:', changedFiles);
+            
+            // Load config
+            let config = { watchers: [] };
+            try {
+              const content = await fs.readFile('.github/agentwatch.yml', 'utf8');
+              config = yaml.load(content) || { watchers: [] };
+              console.log('Loaded config with', config.watchers.length, 'watchers');
+            } catch (e) {
+              console.log('Config file error:', e.message);
+              console.log('No watchers configured - this is expected for baseline testing');
+              // This is not an error - just means no watchers are set up
+              return;
+            }
+            
+            // Check if we have watchers to process
+            if (!config.watchers || config.watchers.length === 0) {
+              console.log('No watchers defined in config - skipping (expected for Phase 1)');
+              return;
+            }
+            
+            // Find matching watchers
+            const matchedAgents = new Set();
+            for (const watcher of config.watchers) {
+              console.log(`Checking watcher: ${watcher.agent} with pattern ${watcher.pattern}`);
+              
+              const matched = changedFiles.some(file => {
+                const isMatch = minimatch(file, watcher.pattern);
+                console.log(`  File ${file} matches pattern ${watcher.pattern}: ${isMatch}`);
+                
+                if (!isMatch) return false;
+                
+                // Check exclusions
+                for (const exclude of watcher.exclude || []) {
+                  if (minimatch(file, exclude)) {
+                    console.log(`  File ${file} excluded by pattern ${exclude}`);
+                    return false;
+                  }
+                }
+                return true;
+              });
+              
+              if (matched) {
+                matchedAgents.add(watcher.agent);
+                console.log(`Agent ${watcher.agent} will be triggered`);
+              }
+            }
+            
+            // Remove checking label if it exists
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                name: 'agentwatch:checking'
+              });
+            } catch (e) {
+              // Label might not exist
+            }
+            
+            // Run matched agents
+            for (const agent of matchedAgents) {
+              console.log(`Running agent: ${agent}`);
+              
+              // Add pending label
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [`agent:pending:${agent}`]
+              });
+              
+              // For pr-summary agent
+              if (agent === 'pr-summary') {
+                // Update to running label
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    name: `agent:pending:${agent}`
+                  });
+                } catch (e) {}
+                
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  labels: [`agent:running:${agent}`]
+                });
+                
+                // Get PR details
+                const { data: pr } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber
+                });
+                
+                // Analyze PR
+                let stats = {
+                  filesChanged: files.length,
+                  additions: 0,
+                  deletions: 0,
+                  fileTypes: {},
+                  todos: 0,
+                  fixmes: 0,
+                  breakingChanges: 0
+                };
+                
+                for (const file of files) {
+                  stats.additions += file.additions;
+                  stats.deletions += file.deletions;
+                  
+                  const ext = file.filename.split('.').pop();
+                  stats.fileTypes[ext] = (stats.fileTypes[ext] || 0) + 1;
+                  
+                  if (file.patch) {
+                    const todos = (file.patch.match(/\+.*TODO/gi) || []).length;
+                    const fixmes = (file.patch.match(/\+.*FIXME/gi) || []).length;
+                    const breaking = (file.patch.match(/\+.*BREAKING CHANGE/gi) || []).length;
+                    
+                    stats.todos += todos;
+                    stats.fixmes += fixmes;
+                    stats.breakingChanges += breaking;
+                  }
+                }
+                
+                // Generate summary
+                let riskLevel = 'Low';
+                let riskFactors = [];
+                
+                if (stats.filesChanged > 10) {
+                  riskLevel = 'Medium';
+                  riskFactors.push('Large number of files changed');
+                }
+                
+                if (stats.additions > 500) {
+                  riskLevel = 'High';
+                  riskFactors.push('Significant amount of new code');
+                }
+                
+                if (stats.breakingChanges > 0) {
+                  riskLevel = 'High';
+                  riskFactors.push(`${stats.breakingChanges} breaking change(s) detected`);
+                }
+                
+                if (stats.todos > 5 || stats.fixmes > 3) {
+                  if (riskLevel === 'Low') riskLevel = 'Medium';
+                  riskFactors.push('Multiple TODOs/FIXMEs added');
+                }
+                
+                const fileTypesList = Object.entries(stats.fileTypes)
+                  .map(([ext, count]) => `- .${ext}: ${count} file(s)`)
+                  .join('\n');
+                
+                // Build recommendations list
+                const recommendations = [];
+                if (stats.todos > 0) {
+                  recommendations.push('- Consider addressing TODOs before merging');
+                }
+                if (stats.fixmes > 0) {
+                  recommendations.push('- FIXMEs should be resolved or tracked in issues');
+                }
+                if (stats.breakingChanges > 0) {
+                  recommendations.push('- Ensure breaking changes are documented in release notes');
+                }
+                if (stats.filesChanged > 10) {
+                  recommendations.push('- Consider breaking this PR into smaller, focused changes');
+                }
+                if (!stats.fileTypes['test'] && !stats.fileTypes['spec']) {
+                  recommendations.push('- Add tests for new functionality');
+                }
+                const recommendationText = recommendations.length > 0 
+                  ? recommendations.join('\n') + '\n' 
+                  : '';
+                
+                const summary = `## 📊 PR Summary Report
+
+### Overview
+**Title:** ${pr.title}
+**Files Changed:** ${stats.filesChanged}
+**Lines Added:** +${stats.additions}
+**Lines Deleted:** -${stats.deletions}
+
+### File Types
+${fileTypesList}
+
+### Code Quality Markers
+- **TODOs Added:** ${stats.todos}
+- **FIXMEs Added:** ${stats.fixmes}
+- **Breaking Changes:** ${stats.breakingChanges}
+
+### Risk Assessment
+**Risk Level:** ${riskLevel}
+${riskFactors.length > 0 ? '\n**Risk Factors:**\n' + riskFactors.map(f => `- ${f}`).join('\n') : ''}
+
+### Recommendations
+${recommendationText}
+---
+*Generated by PR Summary Agent (auto-triggered by watcher)*`;
+                
+                // Post summary
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: summary
+                });
+                
+                // Update to reviewed label
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    name: `agent:running:${agent}`
+                  });
+                } catch (e) {}
+                
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  labels: [`agent:reviewed:${agent}`]
+                });
+                
+                console.log('PR Summary agent completed');
+              }
+            }
+            
+            if (matchedAgents.size === 0) {
+              console.log('No agents matched for this PR');
+            }
