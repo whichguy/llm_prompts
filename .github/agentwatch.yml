@@ -33,3 +33,8 @@ excludes:
     excluded_by: whichguy
     excluded_at: '2025-08-07T13:36:21.075683Z'
     pr: 19
+  - pattern: node_modules/**
+    agent: all
+    excluded_by: whichguy
+    excluded_at: '2025-08-07T13:38:05.253549Z'
+    pr: 19
