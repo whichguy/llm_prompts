@@ -1,0 +1,12 @@
+name: AgentWatch PR Test
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test
+        run: |
+          echo "AgentWatch PR Test triggered!"
+          echo "PR: ${{ github.event.pull_request.number }}"
