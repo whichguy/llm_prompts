@@ -1,0 +1,271 @@
+name: Agent - PR Summary
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to analyze'
+        required: true
+        type: string
+      files:
+        description: 'JSON array of matched files (optional)'
+        required: false
+        type: string
+        default: '[]'
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Generate PR Summary
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              const prNumber = parseInt('${{ inputs.pr_number }}');
+              const matchedFiles = JSON.parse('${{ inputs.files }}' || '[]');
+              
+              console.log(`Analyzing PR #${prNumber}`);
+              console.log(`Matched files:`, matchedFiles);
+              
+              // Update label to running
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: 'agent:pending:pr-summary'
+                });
+              } catch (e) {
+                console.log('Could not remove pending label:', e.message);
+              }
+              
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: ['agent:running:pr-summary']
+              });
+              
+              // Get PR details
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              
+              // Get all changed files
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              
+              console.log(`PR has ${files.length} changed files`);
+              
+              // Calculate statistics
+              let stats = {
+                filesChanged: files.length,
+                additions: 0,
+                deletions: 0,
+                fileTypes: {},
+                largestFile: null,
+                largestChanges: 0
+              };
+              
+              for (const file of files) {
+                stats.additions += file.additions;
+                stats.deletions += file.deletions;
+                
+                const ext = file.filename.split('.').pop();
+                stats.fileTypes[ext] = (stats.fileTypes[ext] || 0) + 1;
+                
+                const totalChanges = file.additions + file.deletions;
+                if (totalChanges > stats.largestChanges) {
+                  stats.largestChanges = totalChanges;
+                  stats.largestFile = file.filename;
+                }
+              }
+              
+              // Analyze commit patterns
+              const { data: commits } = await github.rest.pulls.listCommits({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              
+              const commitTypes = {};
+              for (const commit of commits) {
+                const message = commit.commit.message.toLowerCase();
+                if (message.startsWith('fix')) commitTypes.fix = (commitTypes.fix || 0) + 1;
+                else if (message.startsWith('feat')) commitTypes.feat = (commitTypes.feat || 0) + 1;
+                else if (message.startsWith('docs')) commitTypes.docs = (commitTypes.docs || 0) + 1;
+                else if (message.startsWith('test')) commitTypes.test = (commitTypes.test || 0) + 1;
+                else if (message.startsWith('refactor')) commitTypes.refactor = (commitTypes.refactor || 0) + 1;
+                else commitTypes.other = (commitTypes.other || 0) + 1;
+              }
+              
+              // Determine risk level
+              let riskLevel = 'Low';
+              let riskFactors = [];
+              
+              if (stats.filesChanged > 20) {
+                riskLevel = 'High';
+                riskFactors.push(`Large number of files (${stats.filesChanged})`);
+              } else if (stats.filesChanged > 10) {
+                riskLevel = 'Medium';
+                riskFactors.push(`Moderate number of files (${stats.filesChanged})`);
+              }
+              
+              if (stats.additions > 1000) {
+                riskLevel = 'High';
+                riskFactors.push(`Significant additions (${stats.additions} lines)`);
+              } else if (stats.additions > 500) {
+                if (riskLevel === 'Low') riskLevel = 'Medium';
+                riskFactors.push(`Moderate additions (${stats.additions} lines)`);
+              }
+              
+              if (stats.deletions > 500) {
+                if (riskLevel === 'Low') riskLevel = 'Medium';
+                riskFactors.push(`Significant deletions (${stats.deletions} lines)`);
+              }
+              
+              // Generate file types summary
+              const fileTypesList = Object.entries(stats.fileTypes)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([ext, count]) => `- **.${ext}**: ${count} file(s)`)
+                .join('\n');
+              
+              // Generate commit type summary
+              const commitTypesList = Object.entries(commitTypes)
+                .filter(([type, count]) => count > 0)
+                .map(([type, count]) => `- **${type}**: ${count}`)
+                .join('\n');
+              
+              // Build the summary
+              const summary = `## 📊 PR Summary Report
+
+### Overview
+- **Title:** ${pr.title}
+- **Author:** @${pr.user.login}
+- **Branch:** \`${pr.head.ref}\` → \`${pr.base.ref}\`
+- **Commits:** ${commits.length}
+- **Files Changed:** ${stats.filesChanged}
+- **Lines Added:** +${stats.additions}
+- **Lines Deleted:** -${stats.deletions}
+
+### File Analysis
+**Top File Types:**
+${fileTypesList || 'No files changed'}
+
+**Largest Change:**
+${stats.largestFile ? `\`${stats.largestFile}\` (${stats.largestChanges} lines)` : 'N/A'}
+
+### Commit Patterns
+${commitTypesList || '- No conventional commits detected'}
+
+### Risk Assessment
+**Risk Level:** ${riskLevel} ${riskLevel === 'High' ? '⚠️' : riskLevel === 'Medium' ? '⚡' : '✅'}
+
+${riskFactors.length > 0 ? `**Risk Factors:**\n${riskFactors.map(f => `- ${f}`).join('\n')}` : ''}
+
+### Files Matched by Watcher
+${matchedFiles.length > 0 ? matchedFiles.map(f => `- \`${f}\``).join('\n') : 'No specific files matched (analyzing entire PR)'}
+
+### Recommendations
+${stats.filesChanged > 20 ? '- Consider breaking this PR into smaller, focused changes\n' : ''}${stats.additions > 1000 ? '- Large amount of new code - ensure adequate test coverage\n' : ''}${!commitTypes.test && stats.additions > 100 ? '- Consider adding tests for new functionality\n' : ''}${!commitTypes.docs && stats.additions > 200 ? '- Consider updating documentation\n' : ''}${riskLevel === 'High' ? '- High risk PR - recommend thorough review and testing\n' : ''}
+
+---
+*Generated by PR Summary Agent via AgentWatch*
+*Risk Levels: Low ✅ | Medium ⚡ | High ⚠️*`;
+              
+              // Post the summary
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: summary
+              });
+              
+              console.log('Posted PR summary');
+              
+              // Update label to reviewed
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: 'agent:running:pr-summary'
+                });
+              } catch (e) {
+                console.log('Could not remove running label:', e.message);
+              }
+              
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: ['agent:reviewed:pr-summary']
+              });
+              
+              console.log('PR Summary agent completed successfully');
+              
+            } catch (error) {
+              console.error('Error in PR Summary agent:', error);
+              
+              // Try to update label to error state
+              try {
+                const prNumber = parseInt('${{ inputs.pr_number }}');
+                
+                // Remove any existing agent labels
+                const labelsToRemove = ['agent:pending:pr-summary', 'agent:running:pr-summary'];
+                for (const label of labelsToRemove) {
+                  try {
+                    await github.rest.issues.removeLabel({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: prNumber,
+                      name: label
+                    });
+                  } catch (e) {}
+                }
+                
+                // Add error label
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  labels: ['agent:error:pr-summary']
+                });
+                
+                // Post error comment
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: `❌ **PR Summary Agent Error**
+                  
+Error: ${error.message}
+
+Please check the [workflow logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`
+                });
+              } catch (labelError) {
+                console.error('Could not update error state:', labelError);
+              }
+              
+              core.setFailed(`PR Summary agent failed: ${error.message}`);
+            }
