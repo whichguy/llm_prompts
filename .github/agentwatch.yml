@@ -7,7 +7,13 @@ watches:
     added_by: whichguy
     added_at: '2025-08-07T13:09:43.999683Z'
     pr: 18
-  agentwatch-stateful-validation: []
+  agentwatch-stateful-validation:
+  - pattern: '*.css'
+    agent: stylelint
+    args: ''
+    added_by: whichguy
+    added_at: '2025-08-07T13:37:42.751367Z'
+    pr: 19
 excludes:
   agentwatch-stateful-validation:
   - pattern: '*.js'
