@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: write
-  issues: write
+  issues: write  
   pull-requests: write
   actions: read
 
@@ -42,6 +42,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install js-yaml
+        run: npm install js-yaml minimatch
       - name: Handle Command
         uses: actions/github-script@v7
         with:
@@ -63,7 +69,7 @@ jobs:
               const content = await fs.readFile(configPath, 'utf8');
               config = yaml.load(content) || { watchers: [] };
             } catch (e) {
-              // File doesn't exist, use default
+              console.log('Config file not found, using default');
             }
             
             let message = '';
@@ -84,6 +90,28 @@ jobs:
                   pr_number: prNumber
                 });
                 message = `✅ Watcher added:\n- Agent: ${agent}\n- Pattern: ${pattern}\n- Excludes: []`;
+                
+                // Save config
+                await fs.writeFile(configPath, yaml.dump(config));
+                
+                // Commit changes
+                const { execSync } = require('child_process');
+                execSync(`git config user.name "github-actions[bot]"`);
+                execSync(`git config user.email "github-actions[bot]@users.noreply.github.com"`);
+                execSync(`git add ${configPath}`);
+                execSync(`git commit -m "Update agentwatch config: ${command} ${agent} ${pattern}"`);
+                execSync(`git push`);
+                
+                // Trigger agent on current PR
+                await github.rest.repository.createDispatchEvent({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  event_type: 'run-agent',
+                  client_payload: {
+                    agent: agent,
+                    pr_number: prNumber
+                  }
+                });
               } else {
                 message = `⚠️ Watcher already exists for ${agent} on ${pattern}`;
               }
@@ -95,6 +123,17 @@ jobs:
               if (index !== -1) {
                 config.watchers.splice(index, 1);
                 message = `✅ Watcher removed:\n- Agent: ${agent}\n- Pattern: ${pattern}`;
+                
+                // Save config
+                await fs.writeFile(configPath, yaml.dump(config));
+                
+                // Commit changes
+                const { execSync } = require('child_process');
+                execSync(`git config user.name "github-actions[bot]"`);
+                execSync(`git config user.email "github-actions[bot]@users.noreply.github.com"`);
+                execSync(`git add ${configPath}`);
+                execSync(`git commit -m "Update agentwatch config: ${command} ${agent} ${pattern}"`);
+                execSync(`git push`);
               } else {
                 message = `⚠️ No watcher found for ${agent} on ${pattern}`;
               }
@@ -106,19 +145,6 @@ jobs:
               } else {
                 message = '📋 No active watchers';
               }
-            }
-            
-            // Save config
-            if (command === 'watch' || command === 'unwatch') {
-              await fs.writeFile(configPath, yaml.dump(config));
-              
-              // Commit changes
-              const { execSync } = require('child_process');
-              execSync(`git config user.name "github-actions[bot]"`);
-              execSync(`git config user.email "github-actions[bot]@users.noreply.github.com"`);
-              execSync(`git add ${configPath}`);
-              execSync(`git commit -m "Update agentwatch config: ${command} ${agent} ${pattern}"`);
-              execSync(`git push`);
             }
             
             // Post response
@@ -137,6 +163,12 @@ jobs:
       matched_agents: ${{ steps.check.outputs.matched_agents }}
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: npm install js-yaml minimatch
       - name: Check Watchers
         id: check
         uses: actions/github-script@v7
@@ -154,18 +186,20 @@ jobs:
             });
             
             const changedFiles = files.map(f => f.filename);
+            console.log('Changed files:', changedFiles);
             
             // Load config
             let config = { watchers: [] };
             try {
               const content = await fs.readFile('.github/agentwatch.yml', 'utf8');
               config = yaml.load(content) || { watchers: [] };
+              console.log('Loaded config with watchers:', config.watchers.length);
             } catch (e) {
-              // No config file
+              console.log('No config file found');
             }
             
             // Find matching watchers
-            const matchedAgents = [];
+            const matchedAgents = new Set();
             for (const watcher of config.watchers) {
               const matched = changedFiles.some(file => {
                 if (!minimatch(file, watcher.pattern)) return false;
@@ -176,72 +210,18 @@ jobs:
               });
               
               if (matched) {
-                matchedAgents.push(watcher.agent);
+                matchedAgents.add(watcher.agent);
+                console.log(`Agent ${watcher.agent} matched for pattern ${watcher.pattern}`);
               }
             }
             
-            core.setOutput('has_matches', matchedAgents.length > 0);
-            core.setOutput('matched_agents', matchedAgents.join(','));
+            const agentList = Array.from(matchedAgents);
+            core.setOutput('has_matches', agentList.length > 0 ? 'true' : 'false');
+            core.setOutput('matched_agents', JSON.stringify(agentList));
 
-  run-agents:
+  run-pr-summary:
     needs: check-watchers
-    if: needs.check-watchers.outputs.has_matches == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        agent: ${{ fromJson(needs.check-watchers.outputs.matched_agents) }}
-    steps:
-      - name: Add Pending Label
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              labels: [`agent:pending:${{ matrix.agent }}`]
-            });
-      
-      - name: Update to Running Label
-        uses: actions/github-script@v7
-        with:
-          script: |
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                name: `agent:pending:${{ matrix.agent }}`
-              });
-            } catch (e) {}
-            
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              labels: [`agent:running:${{ matrix.agent }}`]
-            });
-      
-      - name: Run Agent
-        uses: ./.github/workflows/agent-${{ matrix.agent }}.yml
-        
-      - name: Update to Reviewed Label
-        if: success()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                name: `agent:running:${{ matrix.agent }}`
-              });
-            } catch (e) {}
-            
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              labels: [`agent:reviewed:${{ matrix.agent }}`]
-            });
+    if: needs.check-watchers.outputs.has_matches == 'true' && contains(needs.check-watchers.outputs.matched_agents, 'pr-summary')
+    uses: ./.github/workflows/agent-pr-summary.yml
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
