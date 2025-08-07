@@ -15,3 +15,8 @@ excludes:
     excluded_by: whichguy
     excluded_at: '2025-08-07T13:34:53.825594Z'
     pr: 19
+  - pattern: '*.py'
+    agent: ruff
+    excluded_by: whichguy
+    excluded_at: '2025-08-07T13:35:39.031024Z'
+    pr: 19
