@@ -31,6 +31,9 @@ All findings should include:
 - Recommended remediation
 
 ---
-*Version: 1.0.0*
+*Version: 1.1.0*
 *Last Updated: 2025-01-08*
-EOF < /dev/null
+
+## Additional Security Checks
+5. Scan for cross-site scripting (XSS) vulnerabilities
+6. Review HTTPS/TLS configuration
