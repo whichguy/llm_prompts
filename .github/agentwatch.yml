@@ -37,8 +37,9 @@ watches:
   agent: security
   args: ''
   added_by: whichguy
-  added_at: '2025-08-08T04:04:24.063061Z'
+  added_at: '2025-08-08T04:04:26.125407Z'
   pr: 24
+  branch: test-agentwatch-pr1
 excludes:
 - pattern: '*.js'
   agent: eslint
