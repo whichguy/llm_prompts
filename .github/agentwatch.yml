@@ -33,6 +33,13 @@ watches:
   added_at: '2025-08-07T14:35:57.008127Z'
   pr: 23
   branch: agentwatch-precision-test
+- pattern: security-audit-test.md
+  agent: security
+  args: ''
+  added_by: whichguy
+  added_at: '2025-08-08T04:04:26.125407Z'
+  pr: 24
+  branch: test-agentwatch-pr1
 excludes:
 - pattern: '*.js'
   agent: eslint
