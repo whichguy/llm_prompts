@@ -24,11 +24,28 @@ This framework is **MANDATORY** for all agent definitions. Each agent MUST:
 
 **ABSOLUTE PATH DISCIPLINE IS MANDATORY:**
 1. **Capture Initial Directory**: Store the absolute path at agent start using `$(pwd -P)`
-2. **Use Absolute Paths**: All file operations must use absolute paths
-3. **Git Directory Context**: Always use `git -C "$ABSOLUTE_PATH"` for git commands
-4. **Worktree Paths**: Calculate worktree paths absolutely after determining base directory
-5. **No Relative Assumptions**: Never assume `.` or `..` without explicit absolute resolution
-6. **Path Variables**: Store all key paths as absolute variables at start of execution
+2. **NEVER CHANGE CURRENT DIRECTORY**: The current process must NEVER use `cd`, `pushd`, or `popd` - not even for worktrees
+3. **Use Absolute Paths**: All file operations must use absolute paths calculated from base directories
+4. **Git Directory Context**: Always use `git -C "$ABSOLUTE_PATH"` for ALL git commands - never change into directories
+5. **Worktree Path Calculation**: Calculate all worktree paths as variables and use them with `-C` flags or full paths
+6. **No Relative Assumptions**: Never assume `.` or `..` without explicit absolute resolution
+7. **Runtime Path Variables**: Store and use path variables for all operations without changing directories
+
+**⚠️ CRITICAL SAFETY ADDENDUM:**
+```bash
+# ❌ FORBIDDEN - NEVER DO THIS (even for worktrees):
+cd "$WORKTREE_DIR"                    # NEVER change directory
+pushd "$WORKTREE_DIR"                 # NEVER use pushd
+cd ../some-path                       # NEVER navigate relatively
+
+# ✅ REQUIRED - ALWAYS DO THIS:
+git -C "$WORKTREE_DIR" add .          # Use -C flag for git
+npm --prefix "$WORKTREE_DIR" test     # Use --prefix for npm
+echo "data" > "$WORKTREE_DIR/file"    # Use full paths
+find "$WORKTREE_DIR" -name "*.js"     # Specify search root
+```
+
+The current working directory should remain unchanged throughout agent execution to prevent parallel execution conflicts.
 
 ### Centralized Knowledge Management
 
@@ -1253,9 +1270,8 @@ cleanup() {
     [ -f "$temp_abs" ] && rm -f "$temp_abs" && echo "  ✓ Removed temp file: $temp_abs"
   done
   
-  # Return to original absolute directory
-  cd "$ORIGINAL_ABSOLUTE_DIR"
-  echo "📍 Returned to original directory: $(pwd -P)"
+  # No need to return to original directory - we never left!
+  echo "📍 Process remained in constant directory: $(pwd -P)"
   
   # Report execution time
   END_TIME=$(date +%s)
@@ -1276,10 +1292,10 @@ trap cleanup EXIT
 
 # === THE 10 PHASES BELOW ARE MANDATORY - DO NOT SKIP OR REORDER ===
 
-# === PHASE 1: GIT WORKTREE ISOLATION (WITH ABSOLUTE PATHS) ===
+# === PHASE 1: GIT WORKTREE ISOLATION (NO DIRECTORY CHANGES) ===
 current_phase=1
 echo ""
-echo "=== PHASE 1: GIT WORKTREE ISOLATION (ABSOLUTE PATHS) ==="
+echo "=== PHASE 1: GIT WORKTREE ISOLATION (NO DIRECTORY CHANGES) ==="
 create_checkpoint $current_phase
 
 # [FILL IN: Determine if this agent modifies files]
@@ -1288,9 +1304,10 @@ MODIFIES_FILES=[FILL IN: true|false]
 if [ "$MODIFIES_FILES" = "true" ] && [ "$AGENT_DRY_RUN" = "false" ]; then
   echo "Creating isolated git worktree for safe parallel execution..."
   
-  # Store current absolute directory
+  # Store current absolute directory (but NEVER change from it)
   WORKTREE_BASE_DIR="$(pwd -P)"
   echo "📍 Worktree base directory (absolute): $WORKTREE_BASE_DIR"
+  echo "📍 CRITICAL: Process will remain in this directory throughout execution"
   
   # Stage any uncommitted changes before creating worktree
   git -C "$WORKTREE_BASE_DIR" add . 2>/dev/null || true
@@ -1318,7 +1335,8 @@ if [ "$MODIFIES_FILES" = "true" ] && [ "$AGENT_DRY_RUN" = "false" ]; then
   if git -C "$WORKTREE_BASE_DIR" worktree add "$WORKTREE_ABSOLUTE_DIR" -b "$branch_name" 2>/dev/null; then
     echo "✓ Created worktree at: $WORKTREE_ABSOLUTE_DIR"
     echo "✓ Branch: $branch_name"
-    capture_lesson "SUCCESS" "Git worktree created successfully" "Absolute path: $WORKTREE_ABSOLUTE_DIR"
+    echo "⚠️ NOTE: Process remains in: $(pwd -P) (NOT changing to worktree)"
+    capture_lesson "SUCCESS" "Git worktree created without directory change" "Absolute path: $WORKTREE_ABSOLUTE_DIR"
   else
     echo "ERROR: Failed to create git worktree at: $WORKTREE_ABSOLUTE_DIR"
     capture_lesson "FAILURE" "Git worktree creation failed" "Check for existing worktrees"
@@ -1327,28 +1345,31 @@ if [ "$MODIFIES_FILES" = "true" ] && [ "$AGENT_DRY_RUN" = "false" ]; then
     fi
   fi
   
-  # Apply uncommitted changes to worktree
+  # Apply uncommitted changes to worktree (without changing directory)
   echo "Applying uncommitted changes to worktree..."
   git -C "$WORKTREE_BASE_DIR" diff HEAD --binary | git -C "$WORKTREE_ABSOLUTE_DIR" apply --3way 2>/dev/null || {
     echo "Warning: Some patches may not have applied cleanly"
     capture_lesson "INSIGHT" "Patch application may have conflicts" "Consider stashing instead"
   }
   
-  # Initialize submodules in worktree if needed
+  # Initialize submodules in worktree if needed (without changing directory)
   if [ -f "$WORKTREE_ABSOLUTE_DIR/.gitmodules" ]; then
     echo "Initializing submodules in worktree..."
     git -C "$WORKTREE_ABSOLUTE_DIR" submodule update --init --recursive
   fi
   
-  # Move into worktree for all subsequent operations
-  cd "$WORKTREE_ABSOLUTE_DIR"
-  echo "✓ Working in isolated environment: $(pwd -P)"
+  # CRITICAL: Store worktree path for all file operations, but DO NOT cd into it
+  WORK_DIR="$WORKTREE_ABSOLUTE_DIR"
+  echo "✓ Work directory set to: $WORK_DIR (will use with full paths)"
+  echo "✓ Current process remains in: $(pwd -P)"
 else
   if [ "$MODIFIES_FILES" = "true" ]; then
     echo "Skipping git isolation (dry run mode)"
   else
     echo "Skipping git isolation (read-only agent)"
   fi
+  # Set work directory to current location when not using worktree
+  WORK_DIR="$AGENT_WORKING_DIR"
 fi
 
 # === PHASE 2: REHYDRATE PRIOR CONTEXT (ENHANCED) ===
@@ -2197,21 +2218,22 @@ else
   echo "DRY RUN: Would update central lessons at $CENTRAL_LESSONS_FILE"
 fi
 
-# === PHASE 9: GIT WORKTREE MERGE (WITH ABSOLUTE PATHS) ===
+# === PHASE 9: GIT WORKTREE MERGE (NO DIRECTORY CHANGES) ===
 current_phase=9
 echo ""
-echo "=== PHASE 9: GIT WORKTREE MERGE (FOLLOWING GIT WORKFLOW) ==="
+echo "=== PHASE 9: GIT WORKTREE MERGE (NO DIRECTORY CHANGES) ==="
 create_checkpoint $current_phase
 
 if [ "$MODIFIES_FILES" = "true" ] && [ "$AGENT_DRY_RUN" = "false" ]; then
   echo "Merging changes back to main branch..."
-  echo "📍 Current directory: $(pwd -P)"
-  echo "📍 Worktree base: $WORKTREE_BASE_DIR"
+  echo "📍 Current directory (unchanged): $(pwd -P)"
+  echo "📍 Worktree location: $WORKTREE_ABSOLUTE_DIR"
+  echo "📍 Base directory: $WORKTREE_BASE_DIR"
   echo "📚 Following: $BEST_PRACTICES_DIR/git-workflow.md"
+  echo "⚠️ NOTE: All operations use git -C without changing directory"
   
   # Commit all changes in worktree (using git -C with absolute path)
-  CURRENT_DIR="$(pwd -P)"
-  git -C "$CURRENT_DIR" add -A
+  git -C "$WORKTREE_ABSOLUTE_DIR" add -A
   
   # Create detailed commit message following standards
   commit_message="feat($AGENT_NAME): Execute task for ${AGENT_TASK_ID}
@@ -2221,6 +2243,7 @@ Type: $task_type
 Complexity: $task_complexity
 Epic: ${TASK_EPIC:-none}
 Working Directory: $AGENT_WORKING_DIR
+Worktree: $WORKTREE_ABSOLUTE_DIR
 
 Changes:
 - Files created: $files_created
@@ -2243,42 +2266,38 @@ References:
 - Standards: docs/standards/
 - Best Practices: docs/best-practices/"
   
-  if git -C "$CURRENT_DIR" commit -m "$commit_message"; then
-    echo "✓ Changes committed in worktree at: $CURRENT_DIR"
+  if git -C "$WORKTREE_ABSOLUTE_DIR" commit -m "$commit_message"; then
+    echo "✓ Changes committed in worktree at: $WORKTREE_ABSOLUTE_DIR"
     capture_lesson "SUCCESS" "Clean commit with standards compliance" "Following git-workflow.md"
   else
     echo "⚠️ No changes to commit"
   fi
   
-  # Return to original base directory
-  cd "$WORKTREE_BASE_DIR"
-  echo "📍 Returned to worktree base: $(pwd -P)"
-  
-  # Merge changes with no-ff to preserve history (using git -C)
-  echo "Merging branch $branch_name..."
+  # Merge changes with no-ff to preserve history (using git -C on base)
+  echo "Merging branch $branch_name into base repository..."
   if git -C "$WORKTREE_BASE_DIR" merge "$branch_name" --no-ff -m "merge: $AGENT_NAME execution for task $AGENT_TASK_ID
 
 Validation score: $validation_score%
 Quality score: $quality_checks_passed/$quality_checks_total
 Standards compliance: $standards_applied standards"; then
     echo "✓ Changes merged successfully"
-    capture_lesson "SUCCESS" "Git merge completed without conflicts" "$branch_name"
+    capture_lesson "SUCCESS" "Git merge completed without changing directories" "$branch_name"
   else
     echo "ERROR: Merge conflicts detected"
-    echo "Please resolve conflicts manually"
+    echo "Please resolve conflicts manually in base repository: $WORKTREE_BASE_DIR"
     capture_lesson "FAILURE" "Git merge had conflicts" "Manual resolution required"
     if [ "$AGENT_FAIL_ON_CRITICAL" = "true" ]; then
       exit 1
     fi
   fi
   
-  # Clean up worktree (using absolute path)
+  # Clean up worktree (using absolute path, without changing directory)
   echo "Cleaning up worktree at: $WORKTREE_ABSOLUTE_DIR"
   git -C "$WORKTREE_BASE_DIR" worktree prune
   if git -C "$WORKTREE_BASE_DIR" worktree remove "$WORKTREE_ABSOLUTE_DIR" --force 2>/dev/null; then
     echo "✓ Worktree removed: $WORKTREE_ABSOLUTE_DIR"
   else
-    echo "⚠️ Manual cleanup may be needed: git worktree remove $WORKTREE_ABSOLUTE_DIR --force"
+    echo "⚠️ Manual cleanup may be needed: git -C '$WORKTREE_BASE_DIR' worktree remove '$WORKTREE_ABSOLUTE_DIR' --force"
   fi
   
   # Delete branch
@@ -2293,6 +2312,8 @@ Standards compliance: $standards_applied standards"; then
     echo "Updating submodules after merge..."
     git -C "$WORKTREE_BASE_DIR" submodule update --recursive
   fi
+  
+  echo "📍 Process remained in directory: $(pwd -P) throughout merge"
 else
   if [ "$MODIFIES_FILES" = "true" ]; then
     echo "Skipping git merge (dry run mode)"
